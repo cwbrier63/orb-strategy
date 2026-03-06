@@ -10,6 +10,7 @@ class RiskManager:
         self.daily_short_count = 0
         self.daily_long_losses = 0
         self.daily_short_losses = 0
+        self.allocated_dollars = 0.0
 
     def calculate_shares(self, symbol, max_dd_pct, price):
         """
@@ -20,6 +21,17 @@ class RiskManager:
         max_position_dollars = adj_risk / abs(max_dd_pct)
         shares = math.floor(max_position_dollars / price)
         return max(shares, 0)
+
+    def check_allocation(self, shares, price):
+        """Return True if adding this position stays within capital allocation limit."""
+        new_dollars = shares * price
+        return (self.allocated_dollars + new_dollars) <= self.config.MAX_TOTAL_ALLOCATED
+
+    def add_allocation(self, shares, price):
+        self.allocated_dollars += shares * price
+
+    def remove_allocation(self, shares, price):
+        self.allocated_dollars = max(0.0, self.allocated_dollars - (shares * price))
 
     def can_trade_long(self):
         return (self.daily_long_count < self.config.MAX_DAILY_LONGS
@@ -46,3 +58,4 @@ class RiskManager:
         self.daily_short_count = 0
         self.daily_long_losses = 0
         self.daily_short_losses = 0
+        self.allocated_dollars = 0.0

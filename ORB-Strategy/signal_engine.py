@@ -19,19 +19,19 @@ class SignalEngine:
         if orb_high is None:
             return False
 
-        # 1. Price breaks above ORB high + offset on completed 1m bar close
-        if bar.close <= orb_high + self.config.BREAKOUT_OFFSET:
+        # Price breaks above ORB high + long offset on completed 1m bar close
+        if bar.close <= orb_high + self.config.LONG_BREAKOUT_OFFSET:
             return False
 
-        # 2. Close > VWAP
+        # Close > VWAP
         if bar.close <= self.indicators.get_vwap(symbol):
             return False
 
-        # 3. ATR > 0 (indicator is ready)
+        # ATR > 0 (indicator is ready)
         if self.indicators.get_atr(symbol) <= 0:
             return False
 
-        # 7. Current time < 3:30 PM ET (no new entries in last 30 min)
+        # Current time < 3:30 PM ET (no new entries in last 30 min)
         if self.algo.time.time() >= time(15, 30):
             return False
 
@@ -48,19 +48,19 @@ class SignalEngine:
         if orb_low is None:
             return False
 
-        # 1. Price breaks below ORB low - offset on completed 1m bar close
-        if bar.close >= orb_low - self.config.BREAKOUT_OFFSET:
+        # Price breaks below ORB low - short offset on completed 1m bar close
+        if bar.close >= orb_low - self.config.SHORT_BREAKOUT_OFFSET:
             return False
 
-        # 2. Close < VWAP
+        # Close < VWAP
         if bar.close >= self.indicators.get_vwap(symbol):
             return False
 
-        # 3. ATR > 0 (indicator is ready)
+        # ATR > 0 (indicator is ready)
         if self.indicators.get_atr(symbol) <= 0:
             return False
 
-        # 7. Current time < 3:30 PM ET
+        # Current time < 3:30 PM ET
         if self.algo.time.time() >= time(15, 30):
             return False
 

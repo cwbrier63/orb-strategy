@@ -25,7 +25,11 @@ class OrbCalculator:
         if bar_time < self.config.ORB_OPEN_TIME:
             return
 
-        if bar_time >= self.config.ORB_CLOSE_TIME:
+        # Lock using the later of the two direction close times
+        # so both long and short ORB windows are fully built
+        lock_time = max(self.config.LONG_ORB_CLOSE_TIME, self.config.SHORT_ORB_CLOSE_TIME)
+
+        if bar_time >= lock_time:
             if self.orb_high.get(symbol) is not None:
                 self.locked[symbol] = True
                 self.orb_range[symbol] = self.orb_high[symbol] - self.orb_low[symbol]
@@ -35,7 +39,7 @@ class OrbCalculator:
                 )
             return
 
-        # Bar is within ORB window (9:30–9:34 bars)
+        # Bar is within ORB window
         if self.orb_high.get(symbol) is None:
             self.orb_high[symbol] = bar.high
             self.orb_low[symbol] = bar.low

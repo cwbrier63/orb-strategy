@@ -24,12 +24,26 @@ class TradeManager:
 
         profit_in_atrs = abs(current_price - entry_price) / atr if atr > 0 else 0
 
-        if profit_in_atrs >= self.config.ATR_PROFIT_TIER2:
-            multiplier = self.config.ATR_TIER2_MULTIPLIER   # 0.35x
-        elif profit_in_atrs >= self.config.ATR_PROFIT_TIER1:
-            multiplier = self.config.ATR_TIER1_MULTIPLIER   # 0.75x
+        # Select direction-specific ATR trail parameters
+        if is_long:
+            tier2_threshold = self.config.LONG_ATR_PROFIT_TIER2
+            tier1_threshold = self.config.LONG_ATR_PROFIT_TIER1
+            tier2_mult = self.config.LONG_ATR_TIER2_MULTIPLIER
+            tier1_mult = self.config.LONG_ATR_TIER1_MULTIPLIER
+            base_mult = self.config.LONG_ATR_BASE_MULTIPLIER
         else:
-            multiplier = self.config.ATR_BASE_MULTIPLIER    # 1.50x
+            tier2_threshold = self.config.SHORT_ATR_PROFIT_TIER2
+            tier1_threshold = self.config.SHORT_ATR_PROFIT_TIER1
+            tier2_mult = self.config.SHORT_ATR_TIER2_MULTIPLIER
+            tier1_mult = self.config.SHORT_ATR_TIER1_MULTIPLIER
+            base_mult = self.config.SHORT_ATR_BASE_MULTIPLIER
+
+        if profit_in_atrs >= tier2_threshold:
+            multiplier = tier2_mult
+        elif profit_in_atrs >= tier1_threshold:
+            multiplier = tier1_mult
+        else:
+            multiplier = base_mult
 
         trail_distance = atr * multiplier
 
