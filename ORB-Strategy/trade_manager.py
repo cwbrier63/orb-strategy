@@ -9,7 +9,11 @@ class TradeManager:
         self.entries = {}
 
     def register_entry(self, symbol, entry_price, is_long):
-        self.entries[symbol] = {"price": entry_price, "is_long": is_long}
+        if is_long:
+            hard_stop = entry_price * (1 - self.config.LONG_HARD_STOP_PCT)
+        else:
+            hard_stop = entry_price * (1 + self.config.SHORT_HARD_STOP_PCT)
+        self.entries[symbol] = {"price": entry_price, "is_long": is_long, "hard_stop": hard_stop}
         if is_long:
             self.stops[symbol] = 0
         else:
@@ -60,9 +64,20 @@ class TradeManager:
         if symbol not in self.entries:
             return False
 
-        is_long = self.entries[symbol]["is_long"]
-        stop = self.stops.get(symbol)
+        entry = self.entries[symbol]
+        is_long = entry["is_long"]
+        hard_stop = entry["hard_stop"]
 
+        # Hard stop check first
+        if is_long and current_price <= hard_stop:
+            self.algo.log(f"[HARD STOP] {symbol} price={current_price:.2f} hard_stop={hard_stop:.2f}")
+            return True
+        if not is_long and current_price >= hard_stop:
+            self.algo.log(f"[HARD STOP] {symbol} price={current_price:.2f} hard_stop={hard_stop:.2f}")
+            return True
+
+        # ATR trail check
+        stop = self.stops.get(symbol)
         if stop is None:
             return False
 

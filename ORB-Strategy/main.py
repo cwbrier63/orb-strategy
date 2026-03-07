@@ -30,12 +30,7 @@ class OrbAlgorithm(QCAlgorithm):
         # Tagged universe — symbols flagged LONG or SHORT based on gap direction
         # Direction is determined at open each day in daily_reset()
         universe = {
-            "IREN": -0.082,
-            "DKNG": -0.071,
-            "ZETA": -0.065,
-            "TTD":  -0.058,
-            "MOS":  -0.045,
-            "DOW":  -0.091,
+            "TSLA": -0.08,
         }
 
         self.symbols = []
@@ -71,13 +66,21 @@ class OrbAlgorithm(QCAlgorithm):
             self.daily_reset
         )
 
+        # EOD close — flatten all positions at 3:55 PM ET
+        self.schedule.on(
+            self.date_rules.every_day(),
+            self.time_rules.at(15, 55),
+            self.eod_close
+        )
+
     def _apply_parameters(self):
         """Override config defaults with QC optimization parameters if provided."""
         # Long direction parameters
         p = self.get_parameter("long_orb_minutes")
         if p is not None:
             self.config.LONG_ORB_MINUTES = int(p)
-            self.config.LONG_ORB_CLOSE_TIME = time(9, 30 + self.config.LONG_ORB_MINUTES)
+            base = datetime(2000, 1, 1, 9, 30)
+            self.config.LONG_ORB_CLOSE_TIME = (base + timedelta(minutes=self.config.LONG_ORB_MINUTES)).time()
 
         p = self.get_parameter("long_atr_base_mult")
         if p is not None:
@@ -107,7 +110,8 @@ class OrbAlgorithm(QCAlgorithm):
         p = self.get_parameter("short_orb_minutes")
         if p is not None:
             self.config.SHORT_ORB_MINUTES = int(p)
-            self.config.SHORT_ORB_CLOSE_TIME = time(9, 30 + self.config.SHORT_ORB_MINUTES)
+            base = datetime(2000, 1, 1, 9, 30)
+            self.config.SHORT_ORB_CLOSE_TIME = (base + timedelta(minutes=self.config.SHORT_ORB_MINUTES)).time()
 
         p = self.get_parameter("short_atr_base_mult")
         if p is not None:
@@ -133,6 +137,15 @@ class OrbAlgorithm(QCAlgorithm):
         if p is not None:
             self.config.SHORT_BREAKOUT_OFFSET = float(p)
 
+        # Hard stop parameters
+        p = self.get_parameter("long_hard_stop_pct")
+        if p is not None:
+            self.config.LONG_HARD_STOP_PCT = float(p)
+
+        p = self.get_parameter("short_hard_stop_pct")
+        if p is not None:
+            self.config.SHORT_HARD_STOP_PCT = float(p)
+
         # Shared parameters
         p = self.get_parameter("gap_filter_pct")
         if p is not None:
@@ -150,6 +163,13 @@ class OrbAlgorithm(QCAlgorithm):
             clear_sym = self.add_equity(p, Resolution.MINUTE).symbol
             if self.portfolio[clear_sym].invested:
                 self.liquidate(clear_sym)
+
+    def eod_close(self):
+        for symbol in self.symbols:
+            if self.portfolio[symbol].invested:
+                price = self.securities[symbol].price
+                self.exit_position(symbol, price)
+        self.log("[EOD CLOSE] All positions flattened")
 
     def daily_reset(self):
         self.risk_mgr.reset_daily()

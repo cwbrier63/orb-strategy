@@ -27,6 +27,7 @@ class Config:
     LONG_ATR_TIER2_MULTIPLIER = 0.35
     LONG_ATR_PROFIT_TIER1 = 3.0
     LONG_ATR_PROFIT_TIER2 = 5.0
+    LONG_HARD_STOP_PCT = 0.015
 
     # Short parameters
     SHORT_ORB_MINUTES = 15
@@ -37,6 +38,7 @@ class Config:
     SHORT_ATR_TIER2_MULTIPLIER = 0.35
     SHORT_ATR_PROFIT_TIER1 = 3.0
     SHORT_ATR_PROFIT_TIER2 = 5.0
+    SHORT_HARD_STOP_PCT = 0.015
 
     # Gap filter
     GAP_FILTER_PCT = 0.02
