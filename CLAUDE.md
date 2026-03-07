@@ -407,4 +407,88 @@ Confirm the order appears in TTP paper account before enabling SS_ENABLED=True.
 
 ---
 
-*Last updated: March 6, 2026*
+## 16. PHASE 2 — UNIVERSE & DEPLOYMENT ARCHITECTURE
+
+### Two-Bot A/B Framework
+
+Run two independent QC algorithm instances ("Bot A" and "Bot B") against the same universe sheet. Each bot has its own parameter set (ORB minutes, ATR multipliers, hard stop %, breakout offset) optimized independently. Both bots read the same daily universe from Google Sheets but trade with separate SignalStack webhooks so results can be compared side-by-side. This enables live A/B testing of parameter sets without risking full capital on an unproven config.
+
+### Google Sheets Universe Format
+
+A shared Google Sheet ("ORB Universe") drives the daily symbol list. The **Universe** tab has these columns:
+
+| Date | Symbol | Direction | Tier | Gap% | Catalyst | Regime | Notes |
+|------|--------|-----------|------|------|----------|--------|-------|
+| 2026-03-07 | TSLA | LONG | 1 | +3.2% | Earnings beat | Uptrend | Clean breakout history |
+| 2026-03-07 | NVDA | SHORT | 2 | -2.1% | Sector rotation | Uptrend | Watch volume |
+
+- **Date:** Trading date (rows filtered to today's date at runtime)
+- **Symbol:** Ticker to trade
+- **Direction:** LONG or SHORT (from gap analysis)
+- **Tier:** 1, 2, or 3 (from variance scoring)
+- **Gap%:** Pre-market gap percentage
+- **Catalyst:** Brief reason for the gap
+- **Regime:** Market regime tag for the day
+- **Notes:** Free-form notes (optional)
+
+### UNIVERSE_SOURCE Parameter
+
+Control where the algorithm reads its universe via a QC parameter:
+
+```python
+p = self.get_parameter("universe_source")
+if p is not None:
+    self.config.UNIVERSE_SOURCE = p  # "hardcoded", "sheets", or "api"
+```
+
+| Value | Behavior |
+|-------|----------|
+| `hardcoded` | Use the `universe = {}` dict in main.py (current default, used for optimization) |
+| `sheets` | Fetch today's rows from Google Sheets Universe tab at 9:25 AM ET |
+| `api` | Future: fetch from a REST API (Phase 3) |
+
+This allows optimization runs to use a fixed symbol set while paper/live reads from the dynamic sheet.
+
+### Tier-Based Position Sizing
+
+Tier from the Universe sheet scales the base position size calculated by `risk_manager.calculate_shares()`:
+
+| Tier | Size Multiplier | Effect |
+|------|----------------|--------|
+| 1 | 1.00 (100%) | Full size — highest conviction |
+| 2 | 0.75 (75%) | Reduced size — moderate conviction |
+| 3 | 0.50 (50%) | Half size — speculative |
+
+Applied in `risk_manager.py`:
+```python
+tier_multiplier = {1: 1.00, 2: 0.75, 3: 0.50}.get(tier, 0.50)
+shares = math.floor(base_shares * tier_multiplier)
+```
+
+### Results Sheet Write-Back
+
+After each trade closes, the algorithm writes a row to the **Results** tab of the same Google Sheet via `self.notify.web()` → a Google Apps Script webhook. This enables daily P&L review without logging into QC.
+
+Results tab columns:
+
+| Date | Bot | Symbol | Direction | Entry | Exit | Shares | PnL | Stop Type | Tier | Duration |
+|------|-----|--------|-----------|-------|------|--------|-----|-----------|------|----------|
+
+- **Bot:** "A" or "B" (identifies which parameter set)
+- **Stop Type:** "ATR Trail", "Hard Stop", "EOD Close", or "Daily Halt"
+- **Duration:** Minutes from entry to exit
+
+Write-back is gated by `SS_ENABLED` — disabled during backtest, active during paper/live. The Google Apps Script endpoint accepts the same JSON POST pattern as SignalStack.
+
+### Implementation Sequence
+
+1. Add `UNIVERSE_SOURCE` parameter and config default (`"hardcoded"`)
+2. Add `TIER_SIZE_MULTIPLIERS` dict to config.py
+3. Wire tier multiplier into `risk_manager.calculate_shares()`
+4. Build Google Sheets reader (fetch + parse Universe tab rows for today)
+5. Build results writer (POST trade outcomes to Apps Script webhook)
+6. Deploy Bot A and Bot B as separate QC live algorithms with distinct parameter sets
+
+---
+
+*Last updated: March 7, 2026*
