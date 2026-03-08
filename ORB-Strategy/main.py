@@ -1,16 +1,16 @@
 from AlgorithmImports import *
-from config import Config
+from config import OrbConfig
 from orb_calculator import OrbCalculator
 from indicators import IndicatorManager
 from signal_engine import SignalEngine
-from trade_manager import TradeManager
+from trade_manager import TradeManager, TRADE_LOG_COLUMNS
 from risk_manager import RiskManager
 from signalstack_bridge import SignalStackBridge
 
 
 class OrbAlgorithm(QCAlgorithm):
     def initialize(self):
-        self.config = Config()
+        self.config = OrbConfig()
         self._apply_parameters()
 
         self.set_start_date(2025, 1, 1)
@@ -58,6 +58,13 @@ class OrbAlgorithm(QCAlgorithm):
         self.total_losses = 0
         self.total_profit = 0.0
         self.total_loss_amt = 0.0
+
+        # Trade log — accumulates CSV rows, written to ObjectStore at EOA
+        self.trade_log_rows = []
+        self.trade_id = 0
+
+        # Log CSV header for log extraction
+        self.log(f"[TRADE_LOG_HEADER] {','.join(TRADE_LOG_COLUMNS)}")
 
         # Daily reset schedule
         self.schedule.on(
@@ -168,12 +175,13 @@ class OrbAlgorithm(QCAlgorithm):
         for symbol in self.symbols:
             if self.portfolio[symbol].invested:
                 price = self.securities[symbol].price
-                self.exit_position(symbol, price)
+                self.exit_position(symbol, price, "EOD")
         self.log("[EOD CLOSE] All positions flattened")
 
     def daily_reset(self):
         self.risk_mgr.reset_daily()
         self.trade_mgr.reset()
+        self.signal_engine.reset_daily()
         self.daily_halt = False
         self.daily_warning_fired = False
         self.day_start_equity = self.portfolio.total_portfolio_value
@@ -190,6 +198,17 @@ class OrbAlgorithm(QCAlgorithm):
 
     def _tag_direction(self, symbol):
         """Tag symbol as LONG or SHORT based on gap direction at open."""
+        if self.config.FORCE_DIRECTION == 1:
+            self.symbol_direction[symbol] = "LONG"
+            self.gap_qualified[symbol] = True
+            self.log(f"[FORCE_DIRECTION] {symbol} forced to LONG")
+            return True
+        elif self.config.FORCE_DIRECTION == -1:
+            self.symbol_direction[symbol] = "SHORT"
+            self.gap_qualified[symbol] = True
+            self.log(f"[FORCE_DIRECTION] {symbol} forced to SHORT")
+            return True
+
         prior = self.prior_close.get(symbol)
         if prior is None or prior == 0:
             return False
@@ -234,55 +253,95 @@ class OrbAlgorithm(QCAlgorithm):
             self.daily_halt = True
 
     def on_data(self, data):
-        self.check_daily_pnl()
+        try:
+            self.check_daily_pnl()
 
-        if self.daily_halt:
-            return
+            if self.daily_halt:
+                return
 
-        for symbol in self.symbols:
-            if not data.bars.contains_key(symbol):
-                continue
-
-            bar = data.bars[symbol]
-
-            # Build ORB range during opening period
-            self.orb.update(symbol, bar)
-
-            # Skip if ORB not locked or indicators not ready
-            if not self.orb.is_locked(symbol):
-                continue
-            if not self.indicators.is_ready(symbol):
-                continue
-
-            atr = self.indicators.get_atr(symbol)
-            is_invested = self.portfolio[symbol].invested
-
-            # Manage open positions
-            if is_invested:
-                self.trade_mgr.update_trail(symbol, bar.close, atr)
-
-                if self.trade_mgr.check_stop(symbol, bar.close):
-                    self.exit_position(symbol, bar.close)
-                continue
-
-            # Tag direction on first bar after ORB lock if not yet tagged
-            if not self.gap_qualified.get(symbol, False):
-                if not self._tag_direction(symbol):
+            for symbol in self.symbols:
+                if not data.bars.contains_key(symbol):
                     continue
 
-            direction = self.symbol_direction.get(symbol)
-            if direction is None:
-                continue
+                bar = data.bars[symbol]
 
-            # Only trade the tagged direction for this symbol
-            if direction == "LONG":
-                if self.risk_mgr.can_trade_long() and self.signal_engine.check_long(symbol, bar):
-                    self.enter_long(symbol, bar.close)
-            elif direction == "SHORT":
-                if self.risk_mgr.can_trade_short() and self.signal_engine.check_short(symbol, bar):
-                    self.enter_short(symbol, bar.close)
+                # Track previous bar for higher/lower close filter
+                self.signal_engine.update_prev_bar(symbol, bar)
 
-    def enter_long(self, symbol, price):
+                # Build ORB range during opening period
+                self.orb.update(symbol, bar)
+
+                # Skip if ORB not locked or indicators not ready
+                if not self.orb.is_locked(symbol):
+                    continue
+                if not self.indicators.is_ready(symbol):
+                    continue
+
+                atr = self.indicators.get_atr(symbol)
+                is_invested = self.portfolio[symbol].invested
+
+                # Manage open positions
+                if is_invested:
+                    # Unified bar processing: Step 1-5 in strict order
+                    vwap_current = self.indicators.get_vwap(symbol)
+                    stopped, reason = self.trade_mgr.process_bar(
+                        symbol, bar.close, bar.high, bar.low, atr, vwap_current
+                    )
+                    if stopped:
+                        self.exit_position(symbol, bar.close, reason)
+                        continue
+
+                    # Step 5 continued: EMA cross exit
+                    ema_fast = self.indicators.get_ema_fast(symbol)
+                    ema_mid = self.indicators.get_ema_mid(symbol)
+                    if self.trade_mgr.check_ema_cross_exit(symbol, ema_fast, ema_mid):
+                        self.exit_position(symbol, bar.close, "EMA_CROSS")
+                    continue
+
+                # Tag direction on first bar after ORB lock if not yet tagged
+                if not self.gap_qualified.get(symbol, False):
+                    if not self._tag_direction(symbol):
+                        continue
+                    # Store gap_pct on signal engine for gap direction gate
+                    prior = self.prior_close.get(symbol, 0)
+                    today_open = self.securities[symbol].open
+                    gap_pct = (today_open - prior) / prior if prior > 0 else 0
+                    self.signal_engine.set_gap_pct(symbol, gap_pct)
+
+                direction = self.symbol_direction.get(symbol)
+                if direction is None:
+                    continue
+
+                # Only trade the tagged direction for this symbol
+                if direction == "LONG":
+                    if self.risk_mgr.can_trade_long() and self.signal_engine.check_long(symbol, bar):
+                        self.enter_long(symbol, bar, is_long=True)
+                elif direction == "SHORT":
+                    if self.risk_mgr.can_trade_short() and self.signal_engine.check_short(symbol, bar):
+                        self.enter_short(symbol, bar, is_long=False)
+        except Exception as e:
+            self.log(f"[ON_DATA ERROR] {str(e)}")
+
+    def _build_entry_snapshot(self, symbol):
+        """Capture indicator values and config state at entry time."""
+        prior = self.prior_close.get(symbol, 0)
+        today_open = self.securities[symbol].open
+        gap_pct = (today_open - prior) / prior if prior > 0 else 0
+        return {
+            "vwap": self.indicators.get_vwap(symbol),
+            "ema9": self.indicators.get_ema_fast(symbol),
+            "ema20": self.indicators.get_ema_mid(symbol),
+            "ema50": self.indicators.get_ema_slow(symbol),
+            "orb_high": self.orb.get_high(symbol),
+            "orb_low": self.orb.get_low(symbol),
+            "orb_range": self.orb.get_range(symbol),
+            "gap_pct": gap_pct,
+            "prior_close": prior,
+            "today_open": today_open,
+        }
+
+    def enter_long(self, symbol, bar, is_long=True):
+        price = bar.close
         shares = self.risk_mgr.calculate_shares(symbol, self.max_dd[symbol], price)
         if shares <= 0:
             return
@@ -292,14 +351,21 @@ class OrbAlgorithm(QCAlgorithm):
             self.log(f"[ALLOC BLOCKED] {symbol} — ${shares * price:.0f} would exceed limit")
             return
 
+        atr = self.indicators.get_atr(symbol)
+        orb_range = self.orb.get_range(symbol)
+        snapshot = self._build_entry_snapshot(symbol)
+        filter_evals = self.signal_engine.evaluate_filters_at_entry(symbol, bar, is_long=True)
         self.market_order(symbol, shares)
-        self.trade_mgr.register_entry(symbol, price, is_long=True)
+        self.trade_mgr.register_entry(symbol, price, is_long=True, atr=atr, orb_range=orb_range)
+        self.trade_id += 1
+        self.trade_mgr.create_record(symbol, self.trade_id, shares, snapshot, self.config, filter_evals)
         self.risk_mgr.record_long()
         self.risk_mgr.add_allocation(shares, price)
         self.bridge.send(str(symbol), "buy", shares)
         self.log(f"[LONG] {symbol} shares={shares} price={price:.2f}")
 
-    def enter_short(self, symbol, price):
+    def enter_short(self, symbol, bar, is_long=False):
+        price = bar.close
         shares = self.risk_mgr.calculate_shares(symbol, self.max_dd[symbol], price)
         if shares <= 0:
             return
@@ -309,14 +375,20 @@ class OrbAlgorithm(QCAlgorithm):
             self.log(f"[ALLOC BLOCKED] {symbol} — ${shares * price:.0f} would exceed limit")
             return
 
+        atr = self.indicators.get_atr(symbol)
+        orb_range = self.orb.get_range(symbol)
+        snapshot = self._build_entry_snapshot(symbol)
+        filter_evals = self.signal_engine.evaluate_filters_at_entry(symbol, bar, is_long=False)
         self.market_order(symbol, -shares)
-        self.trade_mgr.register_entry(symbol, price, is_long=False)
+        self.trade_mgr.register_entry(symbol, price, is_long=False, atr=atr, orb_range=orb_range)
+        self.trade_id += 1
+        self.trade_mgr.create_record(symbol, self.trade_id, shares, snapshot, self.config, filter_evals)
         self.risk_mgr.record_short()
         self.risk_mgr.add_allocation(shares, price)
         self.bridge.send(str(symbol), "sell_short", shares)
         self.log(f"[SHORT] {symbol} shares={shares} price={price:.2f}")
 
-    def exit_position(self, symbol, price):
+    def exit_position(self, symbol, price, reason=""):
         # Portfolio invested guard — don't liquidate already-closed positions
         if not self.portfolio[symbol].invested:
             self.log(f"[EXIT SKIP] {symbol} — not invested, clearing internal state only")
@@ -346,6 +418,13 @@ class OrbAlgorithm(QCAlgorithm):
         elif not is_long and price > entry_price:
             self.risk_mgr.record_loss(is_long=False)
 
+        # Finalize trade record and log it
+        record = self.trade_mgr.finalize_record(symbol, price, self.time, pnl, quantity, reason)
+        if record:
+            row = TradeManager.format_record_row(record)
+            self.log(f"[TRADE_LOG] {row}")
+            self.trade_log_rows.append(row)
+
         # Release capital allocation
         self.risk_mgr.remove_allocation(quantity, entry_price)
 
@@ -354,33 +433,53 @@ class OrbAlgorithm(QCAlgorithm):
 
         action = "sell" if is_long else "buy_to_cover"
         self.bridge.send(str(symbol), action, quantity)
-        self.log(f"[EXIT] {symbol} action={action} qty={quantity} price={price:.2f} pnl={pnl:.2f}")
+        self.log(f"[EXIT] {symbol} reason={reason} action={action} qty={quantity} price={price:.2f} pnl={pnl:.2f}")
 
     def on_end_of_algorithm(self):
-        starting_cash = self.config.ACCOUNT_SIZE
-        net_profit = self.portfolio.total_portfolio_value - starting_cash
+        try:
+            starting_cash = self.config.ACCOUNT_SIZE
 
-        # Hard disqualifiers
-        if self.max_drawdown_dollars > starting_cash * 0.03:
-            self.log("SCORE:-999.0000")
-            return
-        if self.worst_daily_loss > starting_cash * 0.02:
-            self.log("SCORE:-999.0000")
-            return
-        if net_profit < 0:
-            self.log("SCORE:-999.0000")
+            # Hard disqualifiers — log warnings only (optimizer uses QC built-in metrics)
+            if self.max_drawdown_dollars > starting_cash * 0.03:
+                self.log(f"[EOA WARNING] Max drawdown ${self.max_drawdown_dollars:.2f} exceeded 3% of account")
+            if self.worst_daily_loss > starting_cash * 0.02:
+                self.log(f"[EOA WARNING] Worst daily loss ${self.worst_daily_loss:.2f} exceeded 2% of account")
+
+            # Filter rejection summary (trade-level counts: one per symbol/reason/day)
+            rejects = self.signal_engine.get_reject_counts()
+            candidates = self.signal_engine.get_breakout_candidates()
+            self.log(f"[FILTER_SUMMARY] BREAKOUT_CANDIDATES={candidates}")
+            self.log(f"[FILTER_SUMMARY] TOTAL_ENTRIES={len(self.trade_log_rows)}")
+            self.log(f"[FILTER_SUMMARY] GAP_DIRECTION_REJECTS={rejects.get('GAP_DIRECTION', 0)}")
+            self.log(f"[FILTER_SUMMARY] EMA_ALIGN_REJECTS={rejects.get('EMA_ALIGN', 0)}")
+            self.log(f"[FILTER_SUMMARY] VWAP_REJECTS={rejects.get('VWAP', 0)}")
+            self.log(f"[FILTER_SUMMARY] HIGHER_CLOSE_REJECTS={rejects.get('HIGHER_CLOSE', 0)}")
+            self.log(f"[FILTER_SUMMARY] HIGHER_OPEN_REJECTS={rejects.get('HIGHER_OPEN', 0)}")
+            self.log(f"[FILTER_SUMMARY] VOLUME_RISING_REJECTS={rejects.get('VOLUME_RISING', 0)}")
+            self.log(f"[FILTER_SUMMARY] MAX_WICK_REJECTS={rejects.get('WICK', 0)}")
+            self.log(f"[FILTER_SUMMARY] ENTRY_WINDOW_REJECTS={rejects.get('ENTRY_WINDOW', 0)}")
+            self.log(f"[FILTER_SUMMARY] TIME_CUTOFF_REJECTS={rejects.get('TIME_CUTOFF', 0)}")
+            self.log(f"[FILTER_SUMMARY] ATR_ZERO_REJECTS={rejects.get('ATR_ZERO', 0)}")
+
+            # Write trade log CSV to ObjectStore
+            self._write_trade_log()
+        except Exception as e:
+            self.log(f"[EOA ERROR] {str(e)}")
+
+    def _write_trade_log(self):
+        if not self.trade_log_rows:
+            self.log("[TRADE_LOG] No trades to write")
             return
 
-        # Composite score: expectancy × win_rate
-        total_trades = self.total_wins + self.total_losses
-        if total_trades == 0:
-            self.log("SCORE:-999.0000")
-            return
+        header = ','.join(TRADE_LOG_COLUMNS)
+        csv_content = header + '\n' + '\n'.join(self.trade_log_rows)
 
-        win_rate = self.total_wins / total_trades
-        avg_win = self.total_profit / self.total_wins if self.total_wins > 0 else 0
-        avg_loss = self.total_loss_amt / self.total_losses if self.total_losses > 0 else 0
-        expectancy = (win_rate * avg_win) - ((1 - win_rate) * avg_loss)
-        score = expectancy * win_rate
+        timestamp = self.time.strftime("%Y%m%d_%H%M%S")
+        key_versioned = f"trade_log_{timestamp}.csv"
+        key_latest = "trade_log.csv"
+        self.object_store.save(key_versioned, csv_content)
+        self.object_store.save(key_latest, csv_content)
+        self.log(f"[TRADE_LOG] Wrote {len(self.trade_log_rows)} trades to ObjectStore: {key_versioned} + {key_latest}")
 
-        self.log(f"SCORE:{score:.4f}")
+        # Log summary
+        self.log(f"[TRADE_LOG SUMMARY] {len(self.trade_log_rows)} trades | W:{self.total_wins} L:{self.total_losses}")

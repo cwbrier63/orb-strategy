@@ -1,7 +1,7 @@
 from AlgorithmImports import *
 
 
-class Config:
+class OrbConfig:
     # Account
     ACCOUNT_SIZE = 25000
     BASE_DAILY_RISK = 500           # 2% of account
@@ -28,6 +28,8 @@ class Config:
     LONG_ATR_PROFIT_TIER1 = 3.0
     LONG_ATR_PROFIT_TIER2 = 5.0
     LONG_HARD_STOP_PCT = 0.015
+    LONG_ATR_ACTIVATION_PCT = 50    # Trail doesn't start until profit >= X% of ATR
+    LONG_R_TARGET = 0               # R-multiple take profit (0 = disabled, 1 = 1R, 2 = 2R, etc.)
 
     # Short parameters
     SHORT_ORB_MINUTES = 15
@@ -39,9 +41,23 @@ class Config:
     SHORT_ATR_PROFIT_TIER1 = 3.0
     SHORT_ATR_PROFIT_TIER2 = 5.0
     SHORT_HARD_STOP_PCT = 0.015
+    SHORT_ATR_ACTIVATION_PCT = 50   # Trail doesn't start until profit >= X% of ATR
+    SHORT_R_TARGET = 0              # R-multiple take profit (0 = disabled, 1 = 1R, 2 = 2R, etc.)
+
+    # EMA cross exit
+    EMA_CROSS_EXIT = False          # Exit when EMA9 crosses EMA20 against position
+
+    # VWAP recross exit
+    USE_VWAP_RECROSS_EXIT = True    # Exit when price touches/crosses VWAP against position
+    VWAP_RECROSS_MIN_BARS = 1       # Minimum bars held before VWAP exit can fire
+
+    # Direction override
+    FORCE_DIRECTION = -1            # 1 = force LONG, -1 = force SHORT, 0 = normal gap tagging
 
     # Gap filter
     GAP_FILTER_PCT = 0.02
+    USE_GAP_DIRECTION_GATE = True   # Reject longs on large gap-down, shorts on large gap-up
+    GAP_REJECT_THRESHOLD = 0.03     # Reject if gap magnitude > 3% against forced direction
 
     # EMA periods
     EMA_FAST = 9
@@ -60,6 +76,29 @@ class Config:
     MAX_DAILY_SHORTS = 3
     MAX_DAILY_LOSSES_LONG = 2
     MAX_DAILY_LOSSES_SHORT = 2
+
+    # ── Entry filters — direction-specific ──────────────────────────
+    # Long filters (H2 2025 attribution: EMA+VWAP only, rest net-negative)
+    LONG_REQUIRE_EMA_ALIGN = True
+    LONG_REQUIRE_VWAP = True
+    LONG_REQUIRE_HIGHER_CLOSE = False   # net-negative for longs (blocks WR=43%, P&L=+$40)
+    LONG_REQUIRE_HIGHER_OPEN = False    # net-negative for longs (blocks WR=46%, P&L=+$81)
+    LONG_REQUIRE_VOLUME_RISING = False  # inverted for longs (blocks WR=50.5%, P&L=+$320)
+    LONG_REQUIRE_MAX_WICK = False       # net-negative for longs (blocks WR=44%, P&L=+$66)
+    LONG_REQUIRE_ENTRY_WINDOW = False   # zero effect for longs
+
+    # Short filters (H1 2025 attribution: higher_close, wick, volume all positive)
+    SHORT_REQUIRE_EMA_ALIGN = True
+    SHORT_REQUIRE_VWAP = True
+    SHORT_REQUIRE_HIGHER_CLOSE = True   # +$243 for shorts, blocks 40 losers at 30% WR
+    SHORT_REQUIRE_HIGHER_OPEN = False   # harmful both directions
+    SHORT_REQUIRE_VOLUME_RISING = True  # +$66 for shorts, blocks 79 losers at 40.5% WR
+    SHORT_REQUIRE_MAX_WICK = True       # +$203 for shorts, blocks 68 losers at 39.7% WR
+    SHORT_REQUIRE_ENTRY_WINDOW = False  # no effect
+
+    # Shared filter parameters
+    MAX_WICK_PCT = 50               # Max wick as % of body size (50 = wick can't exceed body)
+    ENTRY_WINDOW_BARS = 1           # Must enter within N bars of breakout detection
 
     # Execution
     SS_ENABLED = False              # Set True for paper/live — False for backtest

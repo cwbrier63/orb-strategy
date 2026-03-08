@@ -25,9 +25,13 @@ class OrbCalculator:
         if bar_time < self.config.ORB_OPEN_TIME:
             return
 
-        # Lock using the later of the two direction close times
-        # so both long and short ORB windows are fully built
-        lock_time = max(self.config.LONG_ORB_CLOSE_TIME, self.config.SHORT_ORB_CLOSE_TIME)
+        # Use direction-specific close time during forced optimization
+        if self.config.FORCE_DIRECTION == 1:
+            lock_time = self.config.LONG_ORB_CLOSE_TIME
+        elif self.config.FORCE_DIRECTION == -1:
+            lock_time = self.config.SHORT_ORB_CLOSE_TIME
+        else:
+            lock_time = max(self.config.LONG_ORB_CLOSE_TIME, self.config.SHORT_ORB_CLOSE_TIME)
 
         if bar_time >= lock_time:
             if self.orb_high.get(symbol) is not None:
