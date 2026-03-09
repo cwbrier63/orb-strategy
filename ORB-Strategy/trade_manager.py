@@ -18,7 +18,8 @@ TRADE_LOG_COLUMNS = [
     # Group 4: Config Parameters (direction-specific)
     'p_orb_minutes', 'p_breakout_offset', 'p_hard_stop_pct',
     'p_atr_base_mult', 'p_atr_tier1_mult', 'p_atr_tier2_mult',
-    'p_atr_profit_tier1', 'p_atr_profit_tier2', 'p_atr_activation_pct', 'p_r_target',
+    'p_atr_profit_tier1', 'p_atr_profit_tier2', 'p_atr_activation_pct',
+    'p_use_take_profit', 'p_r_tp1', 'p_r_tp2', 'p_r_tp3',
     # Group 4: Config Parameters (shared)
     'p_account_size', 'p_base_daily_risk', 'p_max_total_allocated', 'p_regime_current',
     'p_gap_filter_pct', 'p_ema_fast', 'p_ema_mid', 'p_ema_slow', 'p_atr_period',
@@ -29,11 +30,30 @@ TRADE_LOG_COLUMNS = [
     'f_higher_close', 'f_higher_open', 'f_volume_rising',
     'f_max_wick', 'f_entry_window',
     'f_ema_cross_exit', 'f_vwap_recross_exit',
-    # Group 6: Counterfactual Entry Filter Evaluation (raw pass/fail at entry)
+    # Group 6: Universe Selection Context
+    'u_source', 'u_tier', 'u_max_dd',
+    'u_scanner_gap_pct', 'u_scanner_atr', 'u_scanner_adv',
+    # Group 6c: Universe Sheet Fields (from Google Sheets Universe tab)
+    'u_gap_pct_sheet', 'u_catalyst', 'u_cat_quality', 'u_var_tier', 'u_final_tier',
+    'u_max_dd_sheet', 'u_net_perf', 'u_expectancy', 'u_notes',
+    'u_ti_timestamp', 'u_ti_price', 'u_ti_chg_dollar', 'u_ti_chg_pct',
+    'u_ti_volume', 'u_ti_rel_vol', 'u_ti_gap_pct', 'u_ti_float',
+    'u_ti_atr', 'u_ti_avg_vol_5d', 'u_ti_dist_vwap',
+    # Group 6b: Universe Filter Thresholds (config at time of selection)
+    'u_min_price', 'u_min_adv', 'u_min_today_volume',
+    'u_min_atr', 'u_gap_pct_min', 'u_gap_pct_max',
+    'u_max_short_float', 'u_min_float_shares',
+    'u_require_eps', 'u_min_market_cap',
+    'u_no_earnings_today', 'u_max_symbols', 'u_max_price',
+    # Group 7: Real-Time Entry Bar Data
+    'prior_close', 'today_open',
+    'entry_bar_volume', 'entry_bar_range', 'entry_spread', 'entry_spread_pct',
+    'p_max_spread_pct',
+    # Group 8: Counterfactual Entry Filter Evaluation (raw pass/fail at entry)
     'cf_gap_direction_pass', 'cf_ema_align_pass', 'cf_vwap_pass',
     'cf_higher_close_pass', 'cf_higher_open_pass', 'cf_volume_rising_pass',
     'cf_max_wick_pass', 'cf_entry_window_pass',
-    # Group 7: Counterfactual Exit Analysis
+    # Group 9: Counterfactual Exit Analysis
     'cf_r0p5_price', 'cf_r0p5_hit',
     'cf_r1_price', 'cf_r1_hit',
     'cf_r1p5_price', 'cf_r1p5_hit',
@@ -43,6 +63,10 @@ TRADE_LOG_COLUMNS = [
     'cf_vwap_recross_price', 'cf_vwap_recross_hit',
     'cf_ema_cross_at_entry', 'cf_ema9_minus_ema20',
     'cf_breakeven_price', 'cf_above_breakeven_at_exit',
+    # Group 10: Take Profit Tracking
+    'tp1_price', 'tp1_hit', 'tp1_shares', 'tp1_fill_price',
+    'tp2_price', 'tp2_hit', 'tp2_shares', 'tp2_fill_price',
+    'tp3_price', 'tp3_hit', 'tp3_shares', 'tp3_fill_price',
 ]
 
 
@@ -56,23 +80,37 @@ class TradeManager:
 
     # ─── Entry Registration ───────────────────────────────────────
 
-    def register_entry(self, symbol, entry_price, is_long, atr, orb_range):
+    def register_entry(self, symbol, entry_price, is_long, atr, orb_range, total_shares=0):
         if is_long:
             hard_stop = entry_price * (1 - self.config.LONG_HARD_STOP_PCT)
             activation_pct = self.config.LONG_ATR_ACTIVATION_PCT
-            r_target = self.config.LONG_R_TARGET
+            r_levels = [self.config.LONG_R_TP1, self.config.LONG_R_TP2, self.config.LONG_R_TP3]
         else:
             hard_stop = entry_price * (1 + self.config.SHORT_HARD_STOP_PCT)
             activation_pct = self.config.SHORT_ATR_ACTIVATION_PCT
-            r_target = self.config.SHORT_R_TARGET
+            r_levels = [self.config.SHORT_R_TP1, self.config.SHORT_R_TP2, self.config.SHORT_R_TP3]
 
-        # R-target take profit price (0 = disabled)
-        r_take_profit = None
-        if r_target > 0 and orb_range is not None and orb_range > 0:
-            if is_long:
-                r_take_profit = entry_price + orb_range * r_target
-            else:
-                r_take_profit = entry_price - orb_range * r_target
+        # Compute TP prices for each active level (R > 0 and valid ORB range)
+        tp_prices = [None, None, None]
+        if orb_range is not None and orb_range > 0:
+            for i, r in enumerate(r_levels):
+                if r > 0:
+                    if is_long:
+                        tp_prices[i] = entry_price + orb_range * r
+                    else:
+                        tp_prices[i] = entry_price - orb_range * r
+
+        # Auto-size shares per active TP level
+        active_count = sum(1 for p in tp_prices if p is not None)
+        tp_shares = [0, 0, 0]
+        if active_count > 0 and total_shares > 0:
+            per_tp = total_shares // active_count
+            remainder = total_shares - per_tp * active_count
+            idx = 0
+            for i in range(3):
+                if tp_prices[i] is not None:
+                    tp_shares[i] = per_tp + (1 if idx < remainder else 0)
+                    idx += 1
 
         self.entries[symbol] = {
             "price": entry_price,
@@ -83,9 +121,14 @@ class TradeManager:
             "trail_activated": False,
             "highest_since_entry": entry_price,
             "lowest_since_entry": entry_price,
-            "r_take_profit": r_take_profit,
+            "tp_prices": tp_prices,
+            "tp_shares": tp_shares,
+            "tp_hit": [False, False, False],
+            "tp_fill_prices": [None, None, None],
+            "original_shares": total_shares,
             "prev_ema_fast": None,
             "prev_ema_mid": None,
+            "vwap_wrong_side_bars": 0,
         }
         if is_long:
             self.stops[symbol] = 0
@@ -133,7 +176,7 @@ class TradeManager:
             if peak_profit >= entry["activation_threshold"]:
                 entry["trail_activated"] = True
                 just_activated = True
-                self.algo.log(f"[TRAIL ACTIVATED] {symbol} profit={peak_profit:.2f} threshold={entry['activation_threshold']:.2f}")
+                self.algo.debug(f"[TRAIL ACTIVATED] {symbol} profit={peak_profit:.2f} threshold={entry['activation_threshold']:.2f}")
 
         # If trail is activated (either just now or previously), compute trail stop
         if entry["trail_activated"]:
@@ -144,22 +187,31 @@ class TradeManager:
             stop = self.stops.get(symbol)
             if stop is not None:
                 if is_long and bar_low <= stop:
-                    self.algo.log(f"[TRAIL STOP] {symbol} bar_low={bar_low:.2f} trail={stop:.2f}")
+                    self.algo._log(f"[TRAIL STOP] {symbol} bar_low={bar_low:.2f} trail={stop:.2f}")
                     return True, "TRAIL_STOP"
                 if not is_long and bar_high >= stop:
-                    self.algo.log(f"[TRAIL STOP] {symbol} bar_high={bar_high:.2f} trail={stop:.2f}")
+                    self.algo._log(f"[TRAIL STOP] {symbol} bar_high={bar_high:.2f} trail={stop:.2f}")
                     return True, "TRAIL_STOP"
 
-        # ── STEP 4a: VWAP recross exit ──
+        # ── STEP 4a: VWAP recross exit (consecutive bars wrong side) ──
         if self.config.USE_VWAP_RECROSS_EXIT and vwap_current is not None:
-            duration = self.open_records[symbol]['duration_bars'] if symbol in self.open_records else 0
-            if duration >= self.config.VWAP_RECROSS_MIN_BARS:
-                if is_long and bar_low <= vwap_current:
-                    self.algo.log(f"[VWAP RECROSS] {symbol} LONG bar_low={bar_low:.2f} vwap={vwap_current:.2f} bars={duration}")
-                    return True, "VWAP_RECROSS"
-                if not is_long and bar_high >= vwap_current:
-                    self.algo.log(f"[VWAP RECROSS] {symbol} SHORT bar_high={bar_high:.2f} vwap={vwap_current:.2f} bars={duration}")
-                    return True, "VWAP_RECROSS"
+            wrong_side = False
+            if is_long and bar_close < vwap_current:
+                wrong_side = True
+            elif not is_long and bar_close > vwap_current:
+                wrong_side = True
+
+            if wrong_side:
+                entry["vwap_wrong_side_bars"] += 1
+            else:
+                entry["vwap_wrong_side_bars"] = 0
+
+            if entry["vwap_wrong_side_bars"] >= self.config.VWAP_RECROSS_MIN_BARS:
+                if is_long:
+                    self.algo._log(f"[VWAP RECROSS] {symbol} LONG close={bar_close:.2f} vwap={vwap_current:.2f} consecutive={entry['vwap_wrong_side_bars']}")
+                else:
+                    self.algo._log(f"[VWAP RECROSS] {symbol} SHORT close={bar_close:.2f} vwap={vwap_current:.2f} consecutive={entry['vwap_wrong_side_bars']}")
+                return True, "VWAP_RECROSS"
 
         # ── STEP 4b: Hard stop check (uses bar_low for LONG, bar_high for SHORT) ──
         hard_stop = entry["hard_stop"]
@@ -167,25 +219,32 @@ class TradeManager:
             # Verification warning: did price reach trail activation during this trade?
             act_price = entry_price + entry["activation_threshold"]
             if entry.get("highest_since_entry", 0) >= act_price:
-                self.algo.log(f"[WARN] {symbol} HARD_STOP but activation price {act_price:.2f} was reached (high={entry['highest_since_entry']:.2f})")
-            self.algo.log(f"[HARD STOP] {symbol} bar_low={bar_low:.2f} hard_stop={hard_stop:.2f}")
+                self.algo._log(f"[WARN] {symbol} HARD_STOP but activation price {act_price:.2f} was reached (high={entry['highest_since_entry']:.2f})")
+            self.algo._log(f"[HARD STOP] {symbol} bar_low={bar_low:.2f} hard_stop={hard_stop:.2f}")
             return True, "HARD_STOP"
         if not is_long and bar_high >= hard_stop:
             act_price = entry_price - entry["activation_threshold"]
             if entry.get("lowest_since_entry", float('inf')) <= act_price:
-                self.algo.log(f"[WARN] {symbol} HARD_STOP but activation price {act_price:.2f} was reached (low={entry['lowest_since_entry']:.2f})")
-            self.algo.log(f"[HARD STOP] {symbol} bar_high={bar_high:.2f} hard_stop={hard_stop:.2f}")
+                self.algo._log(f"[WARN] {symbol} HARD_STOP but activation price {act_price:.2f} was reached (low={entry['lowest_since_entry']:.2f})")
+            self.algo._log(f"[HARD STOP] {symbol} bar_high={bar_high:.2f} hard_stop={hard_stop:.2f}")
             return True, "HARD_STOP"
 
-        # ── STEP 5: R-target take profit ──
-        r_tp = entry.get("r_take_profit")
-        if r_tp is not None:
-            if is_long and bar_high >= r_tp:
-                self.algo.log(f"[R TARGET] {symbol} bar_high={bar_high:.2f} target={r_tp:.2f}")
-                return True, "R_TARGET"
-            if not is_long and bar_low <= r_tp:
-                self.algo.log(f"[R TARGET] {symbol} bar_low={bar_low:.2f} target={r_tp:.2f}")
-                return True, "R_TARGET"
+        # ── STEP 5: Tiered R take profit (partial exits) ──
+        if self.config.USE_TAKE_PROFIT:
+            for i in range(3):
+                tp_price = entry["tp_prices"][i]
+                if tp_price is not None and not entry["tp_hit"][i]:
+                    hit = False
+                    if is_long and bar_high >= tp_price:
+                        hit = True
+                    elif not is_long and bar_low <= tp_price:
+                        hit = True
+                    if hit:
+                        entry["tp_hit"][i] = True
+                        entry["tp_fill_prices"][i] = tp_price
+                        shares = entry["tp_shares"][i]
+                        self.algo._log(f"[TP{i+1}] {symbol} price={tp_price:.2f} shares={shares}")
+                        return True, f"TP{i+1}"
 
         return False, ""
 
@@ -258,12 +317,12 @@ class TradeManager:
         if is_long:
             # Long exit: EMA9 was above EMA20, now crosses below
             if prev_fast > prev_mid and ema_fast < ema_mid:
-                self.algo.log(f"[EMA CROSS EXIT] {symbol} LONG — EMA9 crossed below EMA20")
+                self.algo._log(f"[EMA CROSS EXIT] {symbol} LONG — EMA9 crossed below EMA20")
                 return True
         else:
             # Short exit: EMA9 was below EMA20, now crosses above
             if prev_fast < prev_mid and ema_fast > ema_mid:
-                self.algo.log(f"[EMA CROSS EXIT] {symbol} SHORT — EMA9 crossed above EMA20")
+                self.algo._log(f"[EMA CROSS EXIT] {symbol} SHORT — EMA9 crossed above EMA20")
                 return True
 
         return False
@@ -294,13 +353,16 @@ class TradeManager:
     # Trade Record System
     # ═══════════════════════════════════════════
 
-    def create_record(self, symbol, trade_id, shares, snapshot, config, filter_evals=None):
+    def create_record(self, symbol, trade_id, shares, snapshot, config, filter_evals=None, universe_meta=None):
         """Create trade record at entry time. Call after register_entry()."""
         entry = self.entries[symbol]
         entry_price = entry["price"]
         is_long = entry["is_long"]
         hard_stop = entry["hard_stop"]
         atr = entry["atr"]
+
+        tp_prices = entry.get("tp_prices", [None, None, None])
+        tp_shares = entry.get("tp_shares", [0, 0, 0])
 
         # R value = risk per share (distance to hard stop)
         r = abs(entry_price - hard_stop)
@@ -317,7 +379,10 @@ class TradeManager:
                 'p_atr_profit_tier1': config.LONG_ATR_PROFIT_TIER1,
                 'p_atr_profit_tier2': config.LONG_ATR_PROFIT_TIER2,
                 'p_atr_activation_pct': config.LONG_ATR_ACTIVATION_PCT,
-                'p_r_target': config.LONG_R_TARGET,
+                'p_use_take_profit': config.USE_TAKE_PROFIT,
+                'p_r_tp1': config.LONG_R_TP1,
+                'p_r_tp2': config.LONG_R_TP2,
+                'p_r_tp3': config.LONG_R_TP3,
             }
         else:
             dir_p = {
@@ -330,7 +395,10 @@ class TradeManager:
                 'p_atr_profit_tier1': config.SHORT_ATR_PROFIT_TIER1,
                 'p_atr_profit_tier2': config.SHORT_ATR_PROFIT_TIER2,
                 'p_atr_activation_pct': config.SHORT_ATR_ACTIVATION_PCT,
-                'p_r_target': config.SHORT_R_TARGET,
+                'p_use_take_profit': config.USE_TAKE_PROFIT,
+                'p_r_tp1': config.SHORT_R_TP1,
+                'p_r_tp2': config.SHORT_R_TP2,
+                'p_r_tp3': config.SHORT_R_TP3,
             }
 
         # Counterfactual R-target prices
@@ -418,7 +486,57 @@ class TradeManager:
             'f_entry_window': config.LONG_REQUIRE_ENTRY_WINDOW if is_long else config.SHORT_REQUIRE_ENTRY_WINDOW,
             'f_ema_cross_exit': config.EMA_CROSS_EXIT,
             'f_vwap_recross_exit': config.USE_VWAP_RECROSS_EXIT,
-            # Group 6: Counterfactual Entry Filter Evaluation
+            # Group 6: Universe Selection Context
+            'u_source': (universe_meta or {}).get('source', 'FALLBACK'),
+            'u_tier': (universe_meta or {}).get('tier', ''),
+            'u_max_dd': (universe_meta or {}).get('max_dd', ''),
+            'u_scanner_gap_pct': round((universe_meta or {}).get('scanner_gap_pct', 0) * 100, 2) if universe_meta else '',
+            'u_scanner_atr': (universe_meta or {}).get('scanner_atr', ''),
+            'u_scanner_adv': (universe_meta or {}).get('scanner_adv', ''),
+            # Group 6c: Universe Sheet Fields
+            'u_gap_pct_sheet': (universe_meta or {}).get('gap_pct_sheet', ''),
+            'u_catalyst': (universe_meta or {}).get('catalyst', ''),
+            'u_cat_quality': (universe_meta or {}).get('cat_quality', ''),
+            'u_var_tier': (universe_meta or {}).get('var_tier', ''),
+            'u_final_tier': (universe_meta or {}).get('final_tier', ''),
+            'u_max_dd_sheet': (universe_meta or {}).get('max_dd_sheet', ''),
+            'u_net_perf': (universe_meta or {}).get('net_perf', ''),
+            'u_expectancy': (universe_meta or {}).get('expectancy', ''),
+            'u_notes': (universe_meta or {}).get('notes', ''),
+            'u_ti_timestamp': (universe_meta or {}).get('ti_timestamp', ''),
+            'u_ti_price': (universe_meta or {}).get('ti_price', ''),
+            'u_ti_chg_dollar': (universe_meta or {}).get('ti_chg_dollar', ''),
+            'u_ti_chg_pct': (universe_meta or {}).get('ti_chg_pct', ''),
+            'u_ti_volume': (universe_meta or {}).get('ti_volume', ''),
+            'u_ti_rel_vol': (universe_meta or {}).get('ti_rel_vol', ''),
+            'u_ti_gap_pct': (universe_meta or {}).get('ti_gap_pct', ''),
+            'u_ti_float': (universe_meta or {}).get('ti_float', ''),
+            'u_ti_atr': (universe_meta or {}).get('ti_atr', ''),
+            'u_ti_avg_vol_5d': (universe_meta or {}).get('ti_avg_vol_5d', ''),
+            'u_ti_dist_vwap': (universe_meta or {}).get('ti_dist_vwap', ''),
+            # Group 6b: Universe Filter Thresholds
+            'u_min_price': config.AUTO_MIN_PRICE if config.USE_AUTO_UNIVERSE else '',
+            'u_min_adv': config.AUTO_MIN_ADV if config.USE_AUTO_UNIVERSE else '',
+            'u_min_today_volume': config.AUTO_MIN_TODAY_VOLUME if config.USE_AUTO_UNIVERSE else '',
+            'u_min_atr': config.AUTO_MIN_ATR if config.USE_AUTO_UNIVERSE else '',
+            'u_gap_pct_min': config.AUTO_GAP_PCT if config.USE_AUTO_UNIVERSE else '',
+            'u_gap_pct_max': config.AUTO_MAX_GAP_PCT if config.USE_AUTO_UNIVERSE else '',
+            'u_max_short_float': config.AUTO_MAX_SHORT_FLOAT if config.USE_AUTO_UNIVERSE else '',
+            'u_min_float_shares': config.AUTO_MIN_FLOAT_SHARES if config.USE_AUTO_UNIVERSE else '',
+            'u_require_eps': config.AUTO_REQUIRE_EPS if config.USE_AUTO_UNIVERSE else '',
+            'u_min_market_cap': config.AUTO_MIN_MARKET_CAP if config.USE_AUTO_UNIVERSE else '',
+            'u_no_earnings_today': config.AUTO_NO_EARNINGS_TODAY if config.USE_AUTO_UNIVERSE else '',
+            'u_max_symbols': config.AUTO_MAX_SYMBOLS if config.USE_AUTO_UNIVERSE else '',
+            'u_max_price': config.AUTO_MAX_PRICE if config.USE_AUTO_UNIVERSE else '',
+            # Group 7: Real-Time Entry Bar Data
+            'prior_close': round(snapshot.get('prior_close', 0), 2),
+            'today_open': round(snapshot.get('today_open', 0), 2),
+            'entry_bar_volume': snapshot.get('bar_volume', 0),
+            'entry_bar_range': round(snapshot.get('bar_range', 0), 4),
+            'entry_spread': round(snapshot.get('spread', 0), 4),
+            'entry_spread_pct': round(snapshot.get('spread_pct', 0), 4),
+            'p_max_spread_pct': config.MAX_SPREAD_PCT,
+            # Group 8: Counterfactual Entry Filter Evaluation
             'cf_gap_direction_pass': fe.get('cf_gap_direction_pass', True),
             'cf_ema_align_pass': fe.get('cf_ema_align_pass', True),
             'cf_vwap_pass': fe.get('cf_vwap_pass', True),
@@ -446,6 +564,16 @@ class TradeManager:
             'cf_ema9_minus_ema20': round(ema9 - ema20, 4),
             'cf_breakeven_price': round(entry_price, 2),
             'cf_above_breakeven_at_exit': False,
+            # Group 10: Take Profit Tracking
+            'tp1_price': round(tp_prices[0], 2) if tp_prices[0] is not None else '',
+            'tp1_hit': False, 'tp1_shares': tp_shares[0] if tp_shares[0] else '',
+            'tp1_fill_price': '',
+            'tp2_price': round(tp_prices[1], 2) if tp_prices[1] is not None else '',
+            'tp2_hit': False, 'tp2_shares': tp_shares[1] if tp_shares[1] else '',
+            'tp2_fill_price': '',
+            'tp3_price': round(tp_prices[2], 2) if tp_prices[2] is not None else '',
+            'tp3_hit': False, 'tp3_shares': tp_shares[2] if tp_shares[2] else '',
+            'tp3_fill_price': '',
             # Internal tracking (excluded from CSV output)
             '_is_long': is_long,
             '_high_extreme': entry_price,
@@ -555,6 +683,19 @@ class TradeManager:
             rec['cf_above_breakeven_at_exit'] = exit_price > entry_price
         else:
             rec['cf_above_breakeven_at_exit'] = exit_price < entry_price
+
+        # TP counterfactual: always track if TP prices were hit (even if TP disabled)
+        if symbol in self.entries:
+            entry = self.entries[symbol]
+            for i in range(3):
+                tp_price = entry.get("tp_prices", [None, None, None])[i]
+                if tp_price is not None:
+                    if is_long:
+                        rec[f'tp{i+1}_hit'] = high_ext >= tp_price
+                    else:
+                        rec[f'tp{i+1}_hit'] = low_ext <= tp_price
+                    if entry.get("tp_fill_prices", [None, None, None])[i] is not None:
+                        rec[f'tp{i+1}_fill_price'] = round(entry["tp_fill_prices"][i], 2)
 
         return rec
 

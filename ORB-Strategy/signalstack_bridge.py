@@ -9,7 +9,7 @@ class SignalStackBridge:
 
     def send(self, symbol: str, action: str, quantity: int):
         if not self.config.SS_ENABLED:
-            self.algo.log(f"[SS_DISABLED] {action} {quantity} {symbol}")
+            self.algo.debug(f"[SS_DISABLED] {action} {quantity} {symbol}")
             return
 
         payload = json.dumps({
@@ -18,6 +18,6 @@ class SignalStackBridge:
             "quantity": quantity
         })
 
-        url = self.config.SS_LIVE_URL  # swap to SS_PAPER_URL for paper
+        url = self.config.SS_LIVE_URL if self.config.SS_LIVE_URL else self.config.SS_PAPER_URL
         self.algo.notify.web(url, payload)
-        self.algo.log(f"[SS_SENT] {action} {quantity} {symbol}")
+        self.algo._log(f"[SS_SENT] {action} {quantity} {symbol}")

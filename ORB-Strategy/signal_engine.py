@@ -32,6 +32,8 @@ class SignalEngine:
         self.breakout_candidates = 0
         # Daily dedup: symbol -> set of reasons already counted today
         self._daily_rejected = {}
+        # Buffer for ObjectStore CSV (first rejection per symbol/reason/day)
+        self._reject_buffer = []
 
     def reset_daily(self):
         self.long_breakout_bar.clear()
@@ -48,6 +50,12 @@ class SignalEngine:
 
     def get_breakout_candidates(self):
         return self.breakout_candidates
+
+    def get_and_clear_reject_buffer(self):
+        """Return buffered rejections and clear. Called by main to write to ObjectStore."""
+        buf = list(self._reject_buffer)
+        self._reject_buffer.clear()
+        return buf
 
     def update_prev_bar(self, symbol, bar):
         """Call from on_data() every bar to track previous bar.
@@ -160,28 +168,27 @@ class SignalEngine:
     # ─── Rejection logging (trade-level: one count per symbol/reason/day) ──
 
     def _log_reject(self, symbol, direction, reason, bar):
-        """Log rejection with indicator context. Count once per symbol/reason/day."""
+        """Count rejection once per symbol/reason/day. No QC log — saves to daily reject buffer."""
         sym_key = str(symbol)
         if sym_key not in self._daily_rejected:
             self._daily_rejected[sym_key] = set()
 
-        # Only increment counter on first occurrence per symbol/reason/day
+        # Only increment counter and buffer on first occurrence per symbol/reason/day
         if reason not in self._daily_rejected[sym_key]:
             self._daily_rejected[sym_key].add(reason)
             self.reject_counts[reason] = self.reject_counts.get(reason, 0) + 1
-
-        ema9 = self.indicators.get_ema_fast(symbol)
-        ema20 = self.indicators.get_ema_mid(symbol)
-        prev = self.prev_bars.get(symbol)
-        prev_close = prev.close if prev else 0
-        prev_open = prev.open if prev else 0
-        gap_pct = self.gap_pcts.get(symbol, 0)
-        self.algo.log(
-            f"[SIGNAL_REJECT] {self.algo.time.strftime('%Y-%m-%d %H:%M')} {symbol} {direction} "
-            f"reason={reason} close={bar.close:.2f} ema9={ema9:.2f} ema20={ema20:.2f} "
-            f"open={bar.open:.2f} prev_open={prev_open:.2f} prev_close={prev_close:.2f} "
-            f"gap_pct={gap_pct*100:.2f}%"
-        )
+            # Buffer first rejection per symbol/reason for ObjectStore CSV
+            self._reject_buffer.append({
+                "time": self.algo.time.strftime("%Y-%m-%d %H:%M"),
+                "symbol": str(symbol),
+                "direction": direction,
+                "reason": reason,
+                "close": bar.close,
+                "open": bar.open,
+                "ema9": self.indicators.get_ema_fast(symbol),
+                "ema20": self.indicators.get_ema_mid(symbol),
+                "gap_pct": self.gap_pcts.get(symbol, 0),
+            })
 
     # ─── Entry signal checks ────────────────────────────────────
 
