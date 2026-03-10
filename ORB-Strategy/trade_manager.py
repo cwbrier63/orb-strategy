@@ -67,13 +67,30 @@ TRADE_LOG_COLUMNS = [
     'tp1_price', 'tp1_hit', 'tp1_shares', 'tp1_fill_price',
     'tp2_price', 'tp2_hit', 'tp2_shares', 'tp2_fill_price',
     'tp3_price', 'tp3_hit', 'tp3_shares', 'tp3_fill_price',
+    # Group 11: SpotGamma Options Data at Entry
+    'sg_gamma_regime', 'sg_call_wall', 'sg_put_wall', 'sg_hedge_wall',
+    'sg_key_gamma_strike', 'sg_key_delta_strike',
+    'sg_cw_dist_pct', 'sg_pw_dist_pct', 'sg_hw_dist_pct',
+    'sg_options_impact', 'sg_impact_tier',
+    'sg_impl_move_dollar', 'sg_impl_move_pct',
+    'sg_est_move_high', 'sg_est_move_low',
+    'sg_iv_rank', 'sg_iv_rank_tier',
+    'sg_inst_conviction', 'sg_dpi_trend', 'sg_skew_signal',
+    'sg_net_gamma', 'sg_gamma_tilt', 'sg_opex_proximity',
+    # Group 11b: SpotGamma Filter Counterfactuals
+    'cf_sg_gamma_regime_pass', 'cf_sg_conviction_pass', 'cf_sg_range_validation_pass',
+    'cf_sg_opex_pass',
+    # Group 11c: SpotGamma Config Flags
+    'f_sg_enabled', 'f_sg_gamma_regime', 'f_sg_conviction',
+    'f_sg_range_validation', 'f_sg_wall_targets', 'f_sg_opex_filter',
 ]
 
 
 class TradeManager:
-    def __init__(self, algorithm, config):
+    def __init__(self, algorithm, config, spotgamma_mgr=None):
         self.algo = algorithm
         self.config = config
+        self.sg = spotgamma_mgr
         self.stops = {}
         self.entries = {}
         self.open_records = {}
@@ -286,6 +303,19 @@ class TradeManager:
 
         trail_distance = atr * multiplier
 
+        # ── SpotGamma wall proximity trail tightening ──
+        if self.config.SG_ENABLED and self.config.SG_USE_WALL_TARGETS and self.sg:
+            wall = None
+            if is_long:
+                wall = self.sg.get_call_wall(symbol)
+            else:
+                wall = self.sg.get_put_wall(symbol)
+            if wall is not None and wall > 0:
+                dist_to_wall = abs(current_price - wall)
+                proximity_threshold = wall * (self.config.SG_WALL_PROXIMITY_PCT / 100)
+                if dist_to_wall <= proximity_threshold:
+                    trail_distance *= self.config.SG_WALL_TRAIL_MULTIPLIER
+
         if is_long:
             new_stop = current_price - trail_distance
             self.stops[symbol] = max(new_stop, self.stops.get(symbol, 0))
@@ -353,7 +383,7 @@ class TradeManager:
     # Trade Record System
     # ═══════════════════════════════════════════
 
-    def create_record(self, symbol, trade_id, shares, snapshot, config, filter_evals=None, universe_meta=None):
+    def create_record(self, symbol, trade_id, shares, snapshot, config, filter_evals=None, universe_meta=None, sg_snapshot=None):
         """Create trade record at entry time. Call after register_entry()."""
         entry = self.entries[symbol]
         entry_price = entry["price"]
@@ -574,12 +604,57 @@ class TradeManager:
             'tp3_price': round(tp_prices[2], 2) if tp_prices[2] is not None else '',
             'tp3_hit': False, 'tp3_shares': tp_shares[2] if tp_shares[2] else '',
             'tp3_fill_price': '',
+            # Group 11: SpotGamma Options Data at Entry
+            **self._stamp_sg_fields(sg_snapshot, fe, config),
             # Internal tracking (excluded from CSV output)
             '_is_long': is_long,
             '_high_extreme': entry_price,
             '_low_extreme': entry_price,
         }
         self.open_records[symbol] = rec
+
+    @staticmethod
+    def _stamp_sg_fields(sg_snapshot, filter_evals, config):
+        """Build sg_ fields dict from SpotGamma snapshot for trade record."""
+        sg = sg_snapshot or {}
+        fe = filter_evals or {}
+        return {
+            'sg_gamma_regime': sg.get('gamma_regime', ''),
+            'sg_call_wall': sg.get('call_wall', ''),
+            'sg_put_wall': sg.get('put_wall', ''),
+            'sg_hedge_wall': sg.get('hedge_wall', ''),
+            'sg_key_gamma_strike': sg.get('key_gamma_strike', ''),
+            'sg_key_delta_strike': sg.get('key_delta_strike', ''),
+            'sg_cw_dist_pct': sg.get('cw_dist_pct', ''),
+            'sg_pw_dist_pct': sg.get('pw_dist_pct', ''),
+            'sg_hw_dist_pct': sg.get('hw_dist_pct', ''),
+            'sg_options_impact': sg.get('options_impact', ''),
+            'sg_impact_tier': sg.get('impact_tier', ''),
+            'sg_impl_move_dollar': sg.get('impl_move_dollar', ''),
+            'sg_impl_move_pct': sg.get('impl_move_pct', ''),
+            'sg_est_move_high': sg.get('est_move_high', ''),
+            'sg_est_move_low': sg.get('est_move_low', ''),
+            'sg_iv_rank': sg.get('iv_rank', ''),
+            'sg_iv_rank_tier': sg.get('iv_rank_tier', ''),
+            'sg_inst_conviction': sg.get('inst_conviction', ''),
+            'sg_dpi_trend': sg.get('dpi_trend', ''),
+            'sg_skew_signal': sg.get('skew_signal', ''),
+            'sg_net_gamma': sg.get('net_gamma', ''),
+            'sg_gamma_tilt': sg.get('gamma_tilt', ''),
+            'sg_opex_proximity': sg.get('opex_proximity', ''),
+            # Group 11b: SpotGamma Filter Counterfactuals
+            'cf_sg_gamma_regime_pass': fe.get('cf_sg_gamma_regime_pass', ''),
+            'cf_sg_conviction_pass': fe.get('cf_sg_conviction_pass', ''),
+            'cf_sg_range_validation_pass': fe.get('cf_sg_range_validation_pass', ''),
+            'cf_sg_opex_pass': fe.get('cf_sg_opex_pass', ''),
+            # Group 11c: SpotGamma Config Flags
+            'f_sg_enabled': config.SG_ENABLED,
+            'f_sg_gamma_regime': config.SG_USE_GAMMA_REGIME,
+            'f_sg_conviction': config.SG_USE_CONVICTION_FILTER,
+            'f_sg_range_validation': config.SG_USE_RANGE_VALIDATION,
+            'f_sg_wall_targets': config.SG_USE_WALL_TARGETS,
+            'f_sg_opex_filter': config.SG_USE_OPEX_FILTER,
+        }
 
     def update_record(self, symbol, bar_close, bar_high, bar_low):
         """Update trade record each bar. Call from on_data() for invested symbols."""

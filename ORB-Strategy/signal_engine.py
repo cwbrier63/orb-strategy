@@ -2,11 +2,12 @@ from AlgorithmImports import *
 
 
 class SignalEngine:
-    def __init__(self, algorithm, config, orb_calculator, indicator_manager):
+    def __init__(self, algorithm, config, orb_calculator, indicator_manager, spotgamma_mgr=None):
         self.algo = algorithm
         self.config = config
         self.orb = orb_calculator
         self.indicators = indicator_manager
+        self.sg = spotgamma_mgr
         # Previous bar tracking for higher/lower close filter
         self.prev_bars = {}
         self.current_bars = {}
@@ -28,6 +29,10 @@ class SignalEngine:
             "VOLUME_RISING": 0,
             "WICK": 0,
             "ENTRY_WINDOW": 0,
+            "SG_GAMMA_REGIME": 0,
+            "SG_CONVICTION": 0,
+            "SG_RANGE_VALIDATION": 0,
+            "SG_OPEX": 0,
         }
         self.breakout_candidates = 0
         # Daily dedup: symbol -> set of reasons already counted today
@@ -138,6 +143,66 @@ class SignalEngine:
             return False
         return True
 
+    # ─── SpotGamma filter evaluations ─────────────────────────────
+
+    def _eval_sg_gamma_regime(self, symbol, is_long):
+        """Negative gamma = chaotic/trending = 43% hard stop rate in backtest.
+        Positive gamma = controlled = 13% hard stop rate. Block on negative.
+        Returns True if trade should proceed (pass), False if blocked."""
+        if not self.sg:
+            return True
+        regime = self.sg.get_gamma_regime(symbol)
+        if regime is None:
+            return True  # No data → pass
+        if regime == "negative":
+            return False
+        return True
+
+    def _eval_sg_conviction(self, symbol, is_long):
+        """Block longs when conviction=bearish, shorts when conviction=bullish/strong_bullish.
+        Optionally block both directions when conviction=neutral (33% hard stop rate)."""
+        if not self.sg:
+            return True
+        conviction = self.sg.get_conviction(symbol)
+        if conviction is None:
+            return True
+        if is_long and self.config.SG_BLOCK_LONG_ON_BEARISH and conviction == "bearish":
+            return False
+        if not is_long and self.config.SG_BLOCK_SHORT_ON_BULLISH and conviction in ("bullish", "strong_bullish"):
+            return False
+        if self.config.SG_BLOCK_ON_NEUTRAL and conviction == "neutral":
+            return False
+        return True
+
+    def _eval_sg_range_validation(self, symbol):
+        """Skip if ORB range already consumed most of the implied move."""
+        if not self.sg:
+            return True
+        impl_dollar, _ = self.sg.get_impl_move(symbol)
+        if impl_dollar is None or impl_dollar <= 0:
+            return True
+        orb_range = self.orb.get_range(symbol)
+        if orb_range is None or orb_range <= 0:
+            return True
+        pct_consumed = (orb_range / impl_dollar) * 100
+        if pct_consumed > self.config.SG_MAX_ORB_TO_IMPLIED_PCT:
+            return False
+        return True
+
+    def _eval_sg_opex_proximity(self, symbol):
+        """Block entries when OPEX proximity is unfavorable.
+        Data: 'near' = 33% hard stops, 8% R1. 'imminent' = 11% hard stops, 63% R1."""
+        if not self.sg:
+            return True
+        opex = self.sg.get_opex_proximity(symbol)
+        if opex is None:
+            return True
+        if self.config.SG_OPEX_BLOCK_NEAR and opex == "near":
+            return False
+        if self.config.SG_OPEX_BLOCK_DISTANT and opex == "distant":
+            return False
+        return True
+
     # ─── Counterfactual filter snapshot ──────────────────────────
 
     def evaluate_filters_at_entry(self, symbol, bar, is_long):
@@ -163,6 +228,10 @@ class SignalEngine:
             'cf_volume_rising_pass': self._eval_volume_rising(symbol, bar),
             'cf_max_wick_pass': self._eval_wick(bar, is_long),
             'cf_entry_window_pass': entry_window_pass,
+            'cf_sg_gamma_regime_pass': self._eval_sg_gamma_regime(symbol, is_long),
+            'cf_sg_conviction_pass': self._eval_sg_conviction(symbol, is_long),
+            'cf_sg_range_validation_pass': self._eval_sg_range_validation(symbol),
+            'cf_sg_opex_pass': self._eval_sg_opex_proximity(symbol),
         }
 
     # ─── Rejection logging (trade-level: one count per symbol/reason/day) ──
@@ -261,6 +330,21 @@ class SignalEngine:
             self._log_reject(symbol, "LONG", "ENTRY_WINDOW", bar)
             return False
 
+        # ── SpotGamma filters (only when SG_ENABLED + individual toggle ON) ──
+        if self.config.SG_ENABLED:
+            if self.config.SG_USE_GAMMA_REGIME and not self._eval_sg_gamma_regime(symbol, is_long=True):
+                self._log_reject(symbol, "LONG", "SG_GAMMA_REGIME", bar)
+                return False
+            if self.config.SG_USE_CONVICTION_FILTER and not self._eval_sg_conviction(symbol, is_long=True):
+                self._log_reject(symbol, "LONG", "SG_CONVICTION", bar)
+                return False
+            if self.config.SG_USE_RANGE_VALIDATION and not self._eval_sg_range_validation(symbol):
+                self._log_reject(symbol, "LONG", "SG_RANGE_VALIDATION", bar)
+                return False
+            if self.config.SG_USE_OPEX_FILTER and not self._eval_sg_opex_proximity(symbol):
+                self._log_reject(symbol, "LONG", "SG_OPEX", bar)
+                return False
+
         return True
 
     def check_short(self, symbol, bar):
@@ -331,5 +415,20 @@ class SignalEngine:
         if self.config.SHORT_REQUIRE_ENTRY_WINDOW and not entry_window_ok:
             self._log_reject(symbol, "SHORT", "ENTRY_WINDOW", bar)
             return False
+
+        # ── SpotGamma filters (only when SG_ENABLED + individual toggle ON) ──
+        if self.config.SG_ENABLED:
+            if self.config.SG_USE_GAMMA_REGIME and not self._eval_sg_gamma_regime(symbol, is_long=False):
+                self._log_reject(symbol, "SHORT", "SG_GAMMA_REGIME", bar)
+                return False
+            if self.config.SG_USE_CONVICTION_FILTER and not self._eval_sg_conviction(symbol, is_long=False):
+                self._log_reject(symbol, "SHORT", "SG_CONVICTION", bar)
+                return False
+            if self.config.SG_USE_RANGE_VALIDATION and not self._eval_sg_range_validation(symbol):
+                self._log_reject(symbol, "SHORT", "SG_RANGE_VALIDATION", bar)
+                return False
+            if self.config.SG_USE_OPEX_FILTER and not self._eval_sg_opex_proximity(symbol):
+                self._log_reject(symbol, "SHORT", "SG_OPEX", bar)
+                return False
 
         return True
