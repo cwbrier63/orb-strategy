@@ -22,13 +22,15 @@ class OrbConfig:
     LONG_ORB_MINUTES = 15
     LONG_ORB_CLOSE_TIME = time(9, 45)
     LONG_BREAKOUT_OFFSET = 0.05
-    LONG_ATR_BASE_MULTIPLIER = 2.50
-    LONG_ATR_TIER1_MULTIPLIER = 0.75
+    LONG_ATR_BASE_MULTIPLIER = 2.00      # was 3.50 — tighter trail captures medium moves
+    LONG_ATR_TIER1_MULTIPLIER = 0.75     # was 1.00 — lock in more at tier1
     LONG_ATR_TIER2_MULTIPLIER = 0.35
-    LONG_ATR_PROFIT_TIER1 = 3.0
-    LONG_ATR_PROFIT_TIER2 = 5.0
+    LONG_ATR_PROFIT_TIER1 = 1.5          # was 3.0 — tier1 kicks in sooner
+    LONG_ATR_PROFIT_TIER2 = 3.0          # was 5.0 — tier2 reachable on strong moves
+    LONG_HARD_STOP_MODE = "atr"    # "pct" = percentage of price, "atr" = ATR multiplier
     LONG_HARD_STOP_PCT = 0.01
-    LONG_ATR_ACTIVATION_PCT = 75    # Trail doesn't start until profit >= X% of ATR
+    LONG_HARD_STOP_ATR_MULT = 2.0  # was 1.5 — wider hard stop reduces chop-outs
+    LONG_ATR_ACTIVATION_PCT = 50   # was 75 — trail activates earlier
     # Long take profit (R-multiples of ORB range, 0 = level disabled)
     LONG_R_TP1 = 0.5
     LONG_R_TP2 = 1.0
@@ -38,17 +40,26 @@ class OrbConfig:
     SHORT_ORB_MINUTES = 15
     SHORT_ORB_CLOSE_TIME = time(9, 45)
     SHORT_BREAKOUT_OFFSET = 0.05
-    SHORT_ATR_BASE_MULTIPLIER = 2.50
-    SHORT_ATR_TIER1_MULTIPLIER = 0.75
+    SHORT_ATR_BASE_MULTIPLIER = 2.00      # was 3.50 — tighter trail captures medium moves
+    SHORT_ATR_TIER1_MULTIPLIER = 0.75     # was 1.00 — lock in more at tier1
     SHORT_ATR_TIER2_MULTIPLIER = 0.35
-    SHORT_ATR_PROFIT_TIER1 = 3.0
-    SHORT_ATR_PROFIT_TIER2 = 5.0
+    SHORT_ATR_PROFIT_TIER1 = 1.5          # was 3.0 — tier1 kicks in sooner
+    SHORT_ATR_PROFIT_TIER2 = 3.0          # was 5.0 — tier2 reachable on strong moves
+    SHORT_HARD_STOP_MODE = "atr"   # "pct" = percentage of price, "atr" = ATR multiplier
     SHORT_HARD_STOP_PCT = 0.01
-    SHORT_ATR_ACTIVATION_PCT = 75   # Trail doesn't start until profit >= X% of ATR
+    SHORT_HARD_STOP_ATR_MULT = 2.0 # was 1.5 — wider hard stop reduces chop-outs
+    SHORT_ATR_ACTIVATION_PCT = 50  # was 75 — trail activates earlier
     # Short take profit (R-multiples of ORB range, 0 = level disabled)
     SHORT_R_TP1 = 0.5
     SHORT_R_TP2 = 1.0
     SHORT_R_TP3 = 2.0
+
+    # Breakeven stop — move hard stop to entry price once R-target is reached
+    USE_BREAKEVEN_STOP = True       # Enable breakeven stop at R0.5
+    BREAKEVEN_R_TRIGGER = 0.5      # Move hard stop to breakeven at this R-multiple
+
+    # Minimum breakout strength — reject if close is < X% beyond ORB level
+    MIN_BREAKOUT_PCT = 0.001       # 0.1% minimum move beyond ORB level
 
     # Take profit master toggle
     USE_TAKE_PROFIT = False         # True = exit partial shares at R levels; False = trail only
@@ -87,8 +98,8 @@ class OrbConfig:
     MAX_DAILY_LOSSES_SHORT = 1      # max short losses per symbol per day
 
     # Global daily limits (total entries across all symbols per day)
-    MAX_DAILY_TOTAL_LONGS = 3       # max total long entries per day (optimization: 3 is optimal)
-    MAX_DAILY_TOTAL_SHORTS = 3      # max total short entries per day (optimization: 3 is optimal)
+    MAX_DAILY_TOTAL_LONGS = 2       # was 3 — reduce long exposure in pressure/downtrend regime
+    MAX_DAILY_TOTAL_SHORTS = 3      # shorts outperform in current regime — keep at 3
     MAX_DAILY_TOTAL_LOSSES = 3      # max total losses (both directions) per day — circuit breaker
 
     # ── Entry filters — direction-specific ──────────────────────────
@@ -139,15 +150,36 @@ class OrbConfig:
     AUTO_MAX_PRICE = 200.0              # price <= $200 — exclude mega-priced stocks
     AUTO_MAX_SYMBOLS = 10               # cap universe per day
 
+    # ── Auto Universe Scoring ─────────────────────────────────
+    AUTO_MIN_COMPOSITE_SCORE = 30       # reject candidates scoring below this
+    AUTO_SCORE_GAP_WEIGHT = 0.25        # gap quality weight (0-100 raw * weight)
+    AUTO_SCORE_ATR_WEIGHT = 0.20        # ATR quality weight
+    AUTO_SCORE_VOLUME_WEIGHT = 0.25     # volume/RVol weight
+    AUTO_SCORE_SG_WEIGHT = 0.15         # SpotGamma conviction alignment weight
+    AUTO_SCORE_LIQUIDITY_WEIGHT = 0.15  # ADV liquidity bonus weight
+
+    # Mini-backtester params
+    AUTO_MINI_BT_DAYS = 30              # days of 1-min history for mini-backtest
+    AUTO_MINI_BT_TIMEOUT = 5.0          # per-symbol timeout (seconds)
+    AUTO_TIER1_MIN_WIN_RATE = 0.50
+    AUTO_TIER1_MIN_EXPECTANCY = 0.30
+    AUTO_TIER2_MIN_WIN_RATE = 0.40
+    AUTO_TIER2_MIN_EXPECTANCY = 0.10
+    AUTO_TIER3_MIN_WIN_RATE = 0.30
+    AUTO_TIER3_MIN_EXPECTANCY = 0.00
+
+    # Gap sustainability check
+    AUTO_GAP_MIN_RETENTION = 0.40       # downgrade if gap retained < 40%
+
     # ── SpotGamma Options Data ─────────────────────────────────
-    SG_ENABLED = True                   # Master toggle — load SpotGamma data
+    SG_ENABLED = True                   # Master toggle — data collection only, filters disabled
     SG_SHEET_BASE_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQ99XE1umgCIwhmEHK4H925kQMJylsUXjG011AZt1vMKVZ2exZcLqMjnst60kz_Hu3BUYsWlxS6TOAx/pub"
     SG_CURRENT_GID = "780844695"
     SG_HISTORY_GID = "1508647299"        # sg_levels tab — historical SpotGamma data
 
     # Filter 1: Gamma Regime — NEGATIVE gamma = chaotic/trending = 43% hard stop rate
     # Data: positive gamma had 13% hard stops, negative had 43%. Block/reduce on negative.
-    SG_USE_GAMMA_REGIME = True
+    SG_USE_GAMMA_REGIME = False
     SG_GAMMA_NEGATIVE_ACTION = "block" # "block" = skip entry; "reduce" = shrink size
     SG_GAMMA_NEGATIVE_SIZE_MULT = 0.50  # Size multiplier when negative gamma + reduce mode
 
@@ -168,7 +200,7 @@ class OrbConfig:
 
     # Filter 5: OPEX Proximity — "near" opex = 33% hard stops, 8% R1 hit rate
     # "imminent" = best (63% R1, 11% hard stops), "distant" = OK
-    SG_USE_OPEX_FILTER = True
+    SG_USE_OPEX_FILTER = False
     SG_OPEX_BLOCK_NEAR = True           # Block entries when opex_proximity = "near"
     SG_OPEX_BLOCK_DISTANT = False       # Block entries when opex_proximity = "distant"
 
@@ -176,3 +208,6 @@ class OrbConfig:
     SS_ENABLED = False              # Set True for paper/live — False for backtest
     SS_PAPER_URL = "https://app.signalstack.com/hook/w3rWj74GcoTYh8MF8FoCxR"
     SS_LIVE_URL = ""                # SignalStack live webhook URL
+    SS_CONFIRM_FIRST = True         # Call SS synchronously, block QC order if broker rejects
+    SS_TIMEOUT_SECONDS = 5          # HTTP timeout for synchronous SS call
+    SS_RETRY_EXITS = False          # Retry failed exit webhooks once before giving up

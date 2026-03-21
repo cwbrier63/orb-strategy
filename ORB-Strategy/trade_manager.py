@@ -16,7 +16,7 @@ TRADE_LOG_COLUMNS = [
     'orb_high', 'orb_low', 'orb_range', 'gap_pct',
     'atr_entry', 'vwap_entry', 'ema9_entry', 'ema20_entry', 'ema50_entry',
     # Group 4: Config Parameters (direction-specific)
-    'p_orb_minutes', 'p_breakout_offset', 'p_hard_stop_pct',
+    'p_orb_minutes', 'p_breakout_offset', 'p_hard_stop_mode', 'p_hard_stop_pct', 'p_hard_stop_atr_mult',
     'p_atr_base_mult', 'p_atr_tier1_mult', 'p_atr_tier2_mult',
     'p_atr_profit_tier1', 'p_atr_profit_tier2', 'p_atr_activation_pct',
     'p_use_take_profit', 'p_r_tp1', 'p_r_tp2', 'p_r_tp3',
@@ -99,11 +99,19 @@ class TradeManager:
 
     def register_entry(self, symbol, entry_price, is_long, atr, orb_range, total_shares=0):
         if is_long:
-            hard_stop = entry_price * (1 - self.config.LONG_HARD_STOP_PCT)
+            mode = self.config.LONG_HARD_STOP_MODE
+            if mode == "atr" and atr > 0:
+                hard_stop = entry_price - atr * self.config.LONG_HARD_STOP_ATR_MULT
+            else:
+                hard_stop = entry_price * (1 - self.config.LONG_HARD_STOP_PCT)
             activation_pct = self.config.LONG_ATR_ACTIVATION_PCT
             r_levels = [self.config.LONG_R_TP1, self.config.LONG_R_TP2, self.config.LONG_R_TP3]
         else:
-            hard_stop = entry_price * (1 + self.config.SHORT_HARD_STOP_PCT)
+            mode = self.config.SHORT_HARD_STOP_MODE
+            if mode == "atr" and atr > 0:
+                hard_stop = entry_price + atr * self.config.SHORT_HARD_STOP_ATR_MULT
+            else:
+                hard_stop = entry_price * (1 + self.config.SHORT_HARD_STOP_PCT)
             activation_pct = self.config.SHORT_ATR_ACTIVATION_PCT
             r_levels = [self.config.SHORT_R_TP1, self.config.SHORT_R_TP2, self.config.SHORT_R_TP3]
 
@@ -134,8 +142,10 @@ class TradeManager:
             "is_long": is_long,
             "hard_stop": hard_stop,
             "atr": atr,
+            "orb_range": orb_range,
             "activation_threshold": atr * (activation_pct / 100),
             "trail_activated": False,
+            "breakeven_activated": False,
             "highest_since_entry": entry_price,
             "lowest_since_entry": entry_price,
             "tp_prices": tp_prices,
@@ -194,6 +204,20 @@ class TradeManager:
                 entry["trail_activated"] = True
                 just_activated = True
                 self.algo.debug(f"[TRAIL ACTIVATED] {symbol} profit={peak_profit:.2f} threshold={entry['activation_threshold']:.2f}")
+
+        # ── STEP 2b: Breakeven stop — move hard stop to entry when R-trigger is hit ──
+        if self.config.USE_BREAKEVEN_STOP and not entry.get("breakeven_activated", False):
+            orb_range = entry.get("orb_range", 0)
+            if orb_range and orb_range > 0:
+                be_distance = orb_range * self.config.BREAKEVEN_R_TRIGGER
+                if is_long and (bar_high - entry_price) >= be_distance:
+                    entry["hard_stop"] = entry_price
+                    entry["breakeven_activated"] = True
+                    self.algo.debug(f"[BREAKEVEN] {symbol} LONG hard stop moved to entry {entry_price:.2f}")
+                elif not is_long and (entry_price - bar_low) >= be_distance:
+                    entry["hard_stop"] = entry_price
+                    entry["breakeven_activated"] = True
+                    self.algo.debug(f"[BREAKEVEN] {symbol} SHORT hard stop moved to entry {entry_price:.2f}")
 
         # If trail is activated (either just now or previously), compute trail stop
         if entry["trail_activated"]:
@@ -402,7 +426,9 @@ class TradeManager:
             dir_p = {
                 'p_orb_minutes': config.LONG_ORB_MINUTES,
                 'p_breakout_offset': config.LONG_BREAKOUT_OFFSET,
+                'p_hard_stop_mode': config.LONG_HARD_STOP_MODE,
                 'p_hard_stop_pct': config.LONG_HARD_STOP_PCT,
+                'p_hard_stop_atr_mult': config.LONG_HARD_STOP_ATR_MULT,
                 'p_atr_base_mult': config.LONG_ATR_BASE_MULTIPLIER,
                 'p_atr_tier1_mult': config.LONG_ATR_TIER1_MULTIPLIER,
                 'p_atr_tier2_mult': config.LONG_ATR_TIER2_MULTIPLIER,
@@ -418,7 +444,9 @@ class TradeManager:
             dir_p = {
                 'p_orb_minutes': config.SHORT_ORB_MINUTES,
                 'p_breakout_offset': config.SHORT_BREAKOUT_OFFSET,
+                'p_hard_stop_mode': config.SHORT_HARD_STOP_MODE,
                 'p_hard_stop_pct': config.SHORT_HARD_STOP_PCT,
+                'p_hard_stop_atr_mult': config.SHORT_HARD_STOP_ATR_MULT,
                 'p_atr_base_mult': config.SHORT_ATR_BASE_MULTIPLIER,
                 'p_atr_tier1_mult': config.SHORT_ATR_TIER1_MULTIPLIER,
                 'p_atr_tier2_mult': config.SHORT_ATR_TIER2_MULTIPLIER,

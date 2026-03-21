@@ -95,7 +95,7 @@ class SpotGammaManager:
 
     def load_current_day(self):
         """Fetch today's SpotGamma data from the current-day tab."""
-        if self.algo.time.weekday() >= 5:
+        if not self.algo._is_trading_day():
             return
         today_str = self.algo.time.strftime("%Y-%m-%d")
         if self.loaded_date == today_str:

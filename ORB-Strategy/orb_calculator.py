@@ -51,6 +51,40 @@ class OrbCalculator:
             self.orb_high[symbol] = max(self.orb_high[symbol], bar.high)
             self.orb_low[symbol] = min(self.orb_low[symbol], bar.low)
 
+    def backfill(self, symbol, history_df):
+        """Build ORB retroactively from historical minute bars when bot starts late.
+        history_df: DataFrame from self.history() with columns high, low and a datetime index."""
+        if self.locked.get(symbol, False):
+            return  # Already locked
+
+        orb_open = self.config.ORB_OPEN_TIME
+        # Use the latest close time across directions
+        if self.config.FORCE_DIRECTION == 1:
+            lock_time = self.config.LONG_ORB_CLOSE_TIME
+        elif self.config.FORCE_DIRECTION == -1:
+            lock_time = self.config.SHORT_ORB_CLOSE_TIME
+        else:
+            lock_time = max(self.config.LONG_ORB_CLOSE_TIME, self.config.SHORT_ORB_CLOSE_TIME)
+
+        if history_df is None or history_df.empty:
+            return
+
+        orb_bars = history_df[
+            (history_df.index.time >= orb_open) & (history_df.index.time < lock_time)
+        ]
+        if orb_bars.empty:
+            return
+
+        self.orb_high[symbol] = float(orb_bars["high"].max())
+        self.orb_low[symbol] = float(orb_bars["low"].min())
+        self.orb_range[symbol] = self.orb_high[symbol] - self.orb_low[symbol]
+        self.locked[symbol] = True
+        self.algo.debug(
+            f"[ORB BACKFILL] {symbol} H={self.orb_high[symbol]:.2f} "
+            f"L={self.orb_low[symbol]:.2f} R={self.orb_range[symbol]:.2f} "
+            f"(from {len(orb_bars)} bars)"
+        )
+
     def is_locked(self, symbol):
         return self.locked.get(symbol, False)
 

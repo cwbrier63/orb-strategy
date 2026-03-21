@@ -276,6 +276,13 @@ class SignalEngine:
         if bar.close <= orb_high + self.config.LONG_BREAKOUT_OFFSET:
             return False
 
+        # Minimum breakout strength — close must be X% above ORB high
+        min_pct = getattr(self.config, 'MIN_BREAKOUT_PCT', 0)
+        if min_pct > 0 and orb_high > 0:
+            if (bar.close - orb_high) / orb_high < min_pct:
+                self._log_reject(symbol, "LONG", "WEAK_BREAKOUT", bar)
+                return False
+
         # This is a breakout candidate — count it and log rejections from here
         self.breakout_candidates += 1
 
@@ -361,6 +368,13 @@ class SignalEngine:
         # Price breaks below ORB low - short offset on completed 1m bar close
         if bar.close >= orb_low - self.config.SHORT_BREAKOUT_OFFSET:
             return False
+
+        # Minimum breakout strength — close must be X% below ORB low
+        min_pct = getattr(self.config, 'MIN_BREAKOUT_PCT', 0)
+        if min_pct > 0 and orb_low > 0:
+            if (orb_low - bar.close) / orb_low < min_pct:
+                self._log_reject(symbol, "SHORT", "WEAK_BREAKOUT", bar)
+                return False
 
         # This is a breakout candidate — count it and log rejections from here
         self.breakout_candidates += 1
