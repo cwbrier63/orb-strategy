@@ -567,8 +567,8 @@ class OrbAlgorithm(QCAlgorithm):
                     "max_dd": c.get("max_dd", -0.06),
                 }
                 self.gap_qualified[sym] = True
-                # Set symbol_direction from symbol_meta (mirrors sheet loader line 313-314)
-                self._tag_direction(sym)
+                self.symbol_direction[sym] = c["direction"]
+                self.signal_engine.set_gap_pct(sym, c["gap_pct"])
                 bt = c.get("bt_stats", {})
                 bt_str = f" WR={bt.get('win_rate', 0):.0%} exp={bt.get('expectancy', 0):.3f}" if bt else ""
                 self.debug(
