@@ -21,14 +21,11 @@ class OrbAlgorithm(QCAlgorithm):
         self.config = OrbConfig()
         self._apply_parameters()
 
-        self.set_start_date(2026, 1, 1)
+        self.set_start_date(2025, 1, 1)
         self.set_end_date(2026, 3, 10)
         self.set_cash(self.config.ACCOUNT_SIZE)
 
         self.set_brokerage_model(BrokerageName.INTERACTIVE_BROKERS_BROKERAGE, AccountType.MARGIN)
-
-        # Reference symbol for US equity market calendar (holidays, early closes)
-        self._market_ref = self.add_equity("SPY", Resolution.MINUTE).symbol
 
         # Modules
         self.orb = OrbCalculator(self, self.config)
@@ -50,9 +47,14 @@ class OrbAlgorithm(QCAlgorithm):
         # Watchlist symbols for gap scanner scanning pool
         self.watchlist_symbols = []
 
-        # Universe mode: sheet first, auto scanner fallback, then hardcoded fallback
-        # Always load watchlist for auto scanner (needed if sheet has no entries for today)
-        if self.config.USE_AUTO_UNIVERSE:
+        if self.config.USE_COARSE_UNIVERSE:
+            from dynamic_universe import get_scan_universe
+            for t in get_scan_universe():
+                try:
+                    s = self.add_equity(t, Resolution.MINUTE, extended_market_hours=True).symbol
+                    self.watchlist_symbols.append(s)
+                except: pass
+        elif self.config.USE_AUTO_UNIVERSE:
             self._load_watchlist()
         if not self.config.USE_AUTO_UNIVERSE and not self.config.UNIVERSE_SHEET_URL:
             self._load_fallback_universe()
@@ -151,14 +153,38 @@ class OrbAlgorithm(QCAlgorithm):
         )
 
     def _is_trading_day(self):
-        """Check if today is a regular US equity trading day using SPY's exchange calendar.
-        Returns False on weekends, market holidays, and any non-trading day."""
-        return self.securities[self._market_ref].exchange.hours.is_date_open(self.time)
+        """Check if today is a US equity trading day (weekends + holidays)."""
+        if self.time.weekday() >= 5:
+            return False
+        y, m, d, dow = self.time.year, self.time.month, self.time.day, self.time.weekday()
+        from datetime import date as dt_date
+        for hm, hd in [(1,1),(6,19),(7,4),(12,25)]:
+            if m == hm and d == hd: return False
+            hol = dt_date(y, hm, hd)
+            if hol.weekday() == 5 and m == hm and d == hd - 1: return False
+            if hol.weekday() == 6 and m == hm and d == hd + 1: return False
+        if m == 1 and dow == 0 and 15 <= d <= 21: return False  # MLK
+        if m == 2 and dow == 0 and 15 <= d <= 21: return False  # Presidents
+        if m == 5 and dow == 0 and d >= 25: return False         # Memorial
+        if m == 9 and dow == 0 and d <= 7: return False          # Labor
+        if m == 11 and dow == 3 and 22 <= d <= 28: return False  # Thanksgiving
+        return True
 
-    def _is_market_hours(self):
-        """Check if current time is within regular US equity market hours.
-        Returns False outside 9:30-16:00 ET, on holidays, early close days after close, etc."""
-        return self.securities[self._market_ref].exchange.hours.is_open(self.time, extended_market_hours=False)
+    def _compute_trend_signals(self, closes):
+        """Trend score -3 to +3."""
+        if len(closes) < 20:
+            return 0
+        sma20 = sum(closes[-20:]) / 20
+        sma20_old = sum(closes[:20]) / 20 if len(closes) >= 21 else sma20
+        signals = 0
+        if sma20 > sma20_old: signals += 1
+        elif sma20 < sma20_old: signals -= 1
+        if closes[-1] > sma20: signals += 1
+        elif closes[-1] < sma20: signals -= 1
+        ret = (closes[-1] - closes[0]) / closes[0] if closes[0] > 0 else 0
+        if ret > self.config.AUTO_TREND_RETURN_THRESHOLD: signals += 1
+        elif ret < -self.config.AUTO_TREND_RETURN_THRESHOLD: signals -= 1
+        return signals
 
     def _log(self, msg):
         """Buffer log message to ObjectStore instead of QC log to avoid daily quota.
@@ -317,20 +343,21 @@ class OrbAlgorithm(QCAlgorithm):
         # Fallback if sheet unavailable
         if not tickers:
             tickers = [
+                "NVO","COHR","B","WDC","CRDO","IAG","UEC","LITE","AXTI","SGML",
                 "AAPL","MSFT","NVDA","AMZN","GOOGL","META","TSLA","AVGO",
                 "JPM","V","UNH","XOM","LLY","MA","HD","PG","COST","ABBV",
                 "PLTR","COIN","HOOD","RIVN","SOFI","UPST","AFRM","DKNG",
                 "AMD","INTC","QCOM","MU","SMCI","MRVL","AMAT","LRCX",
                 "CRWD","PANW","OKTA","ZS","DDOG","NET","SNOW","S",
-                "ENPH","SEDG","FSLR","PLUG","BE","IREN","MARA","HUT",
-                "MRNA","BNTX","BIIB","REGN","VRTX","ILMN",
-                "GS","MS","BAC","WFC","C","AXP","COF",
-                "OXY","DVN","MRO","COP","EOG","SLB","HAL",
-                "LI","XPEV","NIO","LCID",
-                "GME","AMC","RBLX","U","SNAP","PINS",
-                "WMT","TGT","EBAY","W","CHWY","ETSY",
-                "CVS","HCA","THC","CNC","ELV","HUM",
-                "AAOI","RCAT","WKEY","QUBT","QBTS","IONQ",
+                "ENPH","FSLR","MRNA","REGN","VRTX","XENE",
+                "GS","MS","BAC","C","SCHW",
+                "OXY","DVN","COP","SLB","SM","FANG",
+                "NIO","LCID","RBLX","SNAP","ROKU",
+                "WMT","TGT","W","FIGS","LULU","NKE",
+                "BA","RTX","LMT","NCLH","RCL","CCL","UAL","DAL","AAL",
+                "GOLD","AEM","PAAS","CDE","EQX","AGI",
+                "MT","CLF","X","NUE","FCX","AA",
+                "PYPL","SQ","IONQ","RGTI","OKLO","RKLB",
             ]
             self._log(f"[WATCHLIST] Fallback loaded {len(tickers)} symbols")
 
@@ -367,7 +394,7 @@ class OrbAlgorithm(QCAlgorithm):
 
             # Sheet-first priority: if curated list loaded, skip auto scanner
             if self._sheet_loaded_today:
-                self._log("[GAP_SCANNER] Sheet provided symbols for today — skipping auto scan")
+                self._log("[GAP_SCANNER] Sheet symbols — skip scan")
                 return
 
             cfg = self.config
@@ -381,16 +408,17 @@ class OrbAlgorithm(QCAlgorithm):
                 self.symbol_meta.pop(s, None)
             self.auto_universe_candidates.clear()
 
-            self.debug(f"[GAP_SCANNER] {date_str} scanning {len(self.watchlist_symbols)} watchlist symbols")
+            scan_pool = self.watchlist_symbols
+            self.debug(f"[GAP_SCANNER] {date_str} scanning {len(scan_pool)} symbols")
 
-            if not self.watchlist_symbols:
-                self._log("[GAP_SCANNER] No watchlist symbols — skipping")
+            if not scan_pool:
+                self._log("[GAP_SCANNER] No symbols to scan")
                 return
 
             # Get daily history for ATR/ADV calculations
-            all_hist = self.history(self.watchlist_symbols, 22, Resolution.DAILY)
+            all_hist = self.history(scan_pool, 22, Resolution.DAILY)
             if all_hist.empty:
-                self._log("[GAP_SCANNER] No history data available")
+                self._log("[GAP_SCANNER] No history")
                 return
 
             # Build prev_close lookup from daily history
@@ -407,9 +435,9 @@ class OrbAlgorithm(QCAlgorithm):
             # Scan using REAL pre-market prices
             candidates = []
             diag = {"scanned": 0, "no_price": 0, "price_fail": 0, "gap_fail": 0,
-                    "atr_fail": 0, "adv_fail": 0, "errors": 0}
+                    "atr_fail": 0, "adv_fail": 0, "etf_skip": 0, "trend_fail": 0, "errors": 0}
 
-            for sym in self.watchlist_symbols:
+            for sym in scan_pool:
                 try:
                     diag["scanned"] += 1
 
@@ -460,8 +488,18 @@ class OrbAlgorithm(QCAlgorithm):
                         diag["adv_fail"] += 1
                         continue
 
+                    # ETF filter — ETFs lack fundamental data (replaces Trade-Ideas EPS >= $0.01 filter)
+                    if cfg.AUTO_REQUIRE_EPS:
+                        try:
+                            if not self.securities[sym].fundamentals.has_fundamental_data:
+                                diag["etf_skip"] += 1
+                                continue
+                        except:
+                            pass  # if fundamentals unavailable, let it through
+
                     direction = "LONG" if gap_pct > 0 else "SHORT"
-                    candidates.append((sym, gap_pct, atr14, int(adv), pre_market_price, direction))
+
+                    candidates.append((sym, gap_pct, atr14, int(adv), pre_market_price, direction, 0))
                 except:
                     diag["errors"] += 1
                     continue
@@ -469,7 +507,7 @@ class OrbAlgorithm(QCAlgorithm):
             self.debug(f"[GAP_SCANNER DIAG] {diag} candidates={len(candidates)}")
 
             if not candidates:
-                self._log("[GAP_SCANNER] No candidates today")
+                self._log("[GAP_SCANNER] No candidates")
                 return
 
             # Phase 1: Composite scoring — rank by multi-factor score
@@ -483,6 +521,27 @@ class OrbAlgorithm(QCAlgorithm):
             if not scored:
                 self._log("[GAP_SCANNER] All candidates rejected by mini-backtest")
                 return
+
+            # Trend filter on scored winners only (not all 200 candidates — avoids timeout)
+            if cfg.AUTO_TREND_FILTER:
+                filtered = []
+                for c in scored:
+                    sym = c["symbol"]
+                    try:
+                        hist = all_hist.loc[sym]
+                        ts = self._compute_trend_signals(hist["close"].values)
+                        c["trend_signals"] = ts
+                        d = c["direction"]
+                        if d == "SHORT" and ts >= 2:
+                            self.debug(f"[TREND REJECT] {sym.value} SHORT trend={ts}")
+                            continue
+                        if d == "LONG" and ts <= -2:
+                            self.debug(f"[TREND REJECT] {sym.value} LONG trend={ts}")
+                            continue
+                    except:
+                        c["trend_signals"] = 0
+                    filtered.append(c)
+                scored = filtered
 
             # Add winners to active trading list (already subscribed at Minute)
             for c in scored:
@@ -500,6 +559,7 @@ class OrbAlgorithm(QCAlgorithm):
                     "score": c["score"],
                     "pre_market_price": c["price"],
                     "prev_close": prev_closes.get(sym, 0),
+                    "trend_signals": c.get("trend_signals", 0),
                 }
                 self.symbol_meta[sym] = {
                     "direction": c["direction"],
@@ -536,10 +596,10 @@ class OrbAlgorithm(QCAlgorithm):
                 if self.object_store.contains_key(diag_key):
                     existing = self.object_store.read(diag_key)
                 if not existing:
-                    existing = "date,watchlist,scanned,no_price,price_fail,gap_fail,atr_fail,adv_fail,errors,candidates,selected\n"
-                line = (f"{date_str},{len(self.watchlist_symbols)},{diag['scanned']},"
+                    existing = "date,watchlist,scanned,no_price,price_fail,gap_fail,atr_fail,adv_fail,etf_skip,trend_fail,errors,candidates,selected\n"
+                line = (f"{date_str},{len(scan_pool)},{diag['scanned']},"
                         f"{diag['no_price']},{diag['price_fail']},{diag['gap_fail']},"
-                        f"{diag['atr_fail']},{diag['adv_fail']},{diag['errors']},"
+                        f"{diag['atr_fail']},{diag['adv_fail']},{diag['etf_skip']},{diag['trend_fail']},{diag['errors']},"
                         f"{len(candidates)},{len(scored)}")
                 self.object_store.save(diag_key, existing + line + "\n")
             except:
@@ -702,7 +762,7 @@ class OrbAlgorithm(QCAlgorithm):
                         success, resp = self.bridge.send_and_confirm(str(sym), act, qty)
                         if not success:
                             self._log(f"[HALT_EXIT_FAIL] {sym} — {resp}")
-            self.liquidate()
+            self.liquidate(tag="DAILY_HALT")
             self.daily_halt = True
 
     def on_data(self, data):
@@ -843,6 +903,22 @@ class OrbAlgorithm(QCAlgorithm):
                         self._spread_rejected_today.add(sym_key)
                         self._log(f"[SPREAD REJECT] {symbol} spread={spread_pct:.3f}% (${spread:.3f}) bid={bid:.2f} ask={ask:.2f} max={self.config.MAX_SPREAD_PCT}%")
                     continue
+
+                # Late-entry cutoff — no new entries after configured time
+                if bar_time > self.config.LAST_ENTRY_TIME:
+                    continue
+
+                # Price floor — block entries below MIN_PRICE regardless of how symbol entered universe
+                if bar.close < self.config.AUTO_MIN_PRICE:
+                    continue
+
+                # Trend alignment gate — only for sheet-loaded symbols (scanner already filtered)
+                if self.config.AUTO_TREND_FILTER and self._sheet_loaded_today:
+                    ts = self.auto_universe_candidates.get(symbol, {}).get("trend_signals", 0)
+                    if direction == "SHORT" and ts >= 2:
+                        continue
+                    if direction == "LONG" and ts <= -2:
+                        continue
 
                 # Only trade the tagged direction for this symbol (per-symbol daily limits)
                 if direction == "LONG":
@@ -1071,7 +1147,7 @@ class OrbAlgorithm(QCAlgorithm):
 
         if symbol not in self.trade_mgr.entries:
             self._log(f"[EXIT SKIP] {symbol} — no trade_mgr entry, liquidating directly")
-            self.liquidate(symbol)
+            self.liquidate(symbol, tag=reason)
             return
 
         is_long = self.trade_mgr.is_long(symbol)
@@ -1120,7 +1196,7 @@ class OrbAlgorithm(QCAlgorithm):
                     else:
                         self._log(f"[SS_EXIT_RETRY_FAIL] {symbol} — MANUAL INTERVENTION NEEDED: {ss_resp2}")
 
-        self.liquidate(symbol)
+        self.liquidate(symbol, tag=reason)
         self.trade_mgr.remove(symbol)
 
         if not (self.config.SS_ENABLED and self.config.SS_CONFIRM_FIRST):

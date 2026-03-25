@@ -15,15 +15,15 @@ class UniverseScorer:
         """Score and rank gap scanner candidates.
 
         Args:
-            candidates: list of (symbol, gap_pct, atr14, adv, price, direction)
+            candidates: list of (symbol, gap_pct, atr14, adv, price, direction, trend_signals)
             sg_mgr: SpotGammaManager instance (optional)
 
         Returns:
-            Sorted list of dicts with score, tier, max_dd added.
+            Sorted list of dicts with score, tier, max_dd, trend_signals added.
             Only candidates above AUTO_MIN_COMPOSITE_SCORE are returned.
         """
         scored = []
-        for sym, gap_pct, atr14, adv, price, direction in candidates:
+        for sym, gap_pct, atr14, adv, price, direction, trend_signals in candidates:
             gap_score = self._score_gap(abs(gap_pct))
             atr_score = self._score_atr(atr14, price)
             vol_score = self._score_volume(adv)
@@ -47,6 +47,7 @@ class UniverseScorer:
                 "price": price,
                 "direction": direction,
                 "score": round(total, 1),
+                "trend_signals": trend_signals,
                 "detail": f"gap={gap_score:.0f} atr={atr_score:.0f} vol={vol_score:.0f} sg={sg_score:.0f} liq={liq_score:.0f}",
             })
 

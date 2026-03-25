@@ -69,8 +69,19 @@ class OrbCalculator:
         if history_df is None or history_df.empty:
             return
 
-        orb_bars = history_df[
-            (history_df.index.time >= orb_open) & (history_df.index.time < lock_time)
+        # Handle MultiIndex (Symbol + Time levels) from self.history(symbol, ...)
+        if hasattr(history_df.index, 'levels'):
+            # Extract data for this symbol from MultiIndex
+            try:
+                df = history_df.loc[symbol]
+            except KeyError:
+                return
+        else:
+            df = history_df
+
+        # Now filter by time on the datetime index
+        orb_bars = df[
+            (df.index.time >= orb_open) & (df.index.time < lock_time)
         ]
         if orb_bars.empty:
             return

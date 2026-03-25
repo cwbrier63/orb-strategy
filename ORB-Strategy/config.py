@@ -29,7 +29,7 @@ class OrbConfig:
     LONG_ATR_PROFIT_TIER2 = 3.0          # was 5.0 — tier2 reachable on strong moves
     LONG_HARD_STOP_MODE = "atr"    # "pct" = percentage of price, "atr" = ATR multiplier
     LONG_HARD_STOP_PCT = 0.01
-    LONG_HARD_STOP_ATR_MULT = 2.0  # was 1.5 — wider hard stop reduces chop-outs
+    LONG_HARD_STOP_ATR_MULT = 3.0  # optimized: 3x ATR best balance of hard stop vs VWAP recross
     LONG_ATR_ACTIVATION_PCT = 50   # was 75 — trail activates earlier
     # Long take profit (R-multiples of ORB range, 0 = level disabled)
     LONG_R_TP1 = 0.5
@@ -47,7 +47,7 @@ class OrbConfig:
     SHORT_ATR_PROFIT_TIER2 = 3.0          # was 5.0 — tier2 reachable on strong moves
     SHORT_HARD_STOP_MODE = "atr"   # "pct" = percentage of price, "atr" = ATR multiplier
     SHORT_HARD_STOP_PCT = 0.01
-    SHORT_HARD_STOP_ATR_MULT = 2.0 # was 1.5 — wider hard stop reduces chop-outs
+    SHORT_HARD_STOP_ATR_MULT = 3.0 # optimized: 3x ATR best balance of hard stop vs VWAP recross
     SHORT_ATR_ACTIVATION_PCT = 50  # was 75 — trail activates earlier
     # Short take profit (R-multiples of ORB range, 0 = level disabled)
     SHORT_R_TP1 = 0.5
@@ -55,7 +55,7 @@ class OrbConfig:
     SHORT_R_TP3 = 2.0
 
     # Breakeven stop — move hard stop to entry price once R-target is reached
-    USE_BREAKEVEN_STOP = True       # Enable breakeven stop at R0.5
+    USE_BREAKEVEN_STOP = False      # TEST A: disabled to isolate hard stop issue
     BREAKEVEN_R_TRIGGER = 0.5      # Move hard stop to breakeven at this R-multiple
 
     # Minimum breakout strength — reject if close is < X% beyond ORB level
@@ -98,8 +98,8 @@ class OrbConfig:
     MAX_DAILY_LOSSES_SHORT = 1      # max short losses per symbol per day
 
     # Global daily limits (total entries across all symbols per day)
-    MAX_DAILY_TOTAL_LONGS = 2       # was 3 — reduce long exposure in pressure/downtrend regime
-    MAX_DAILY_TOTAL_SHORTS = 3      # shorts outperform in current regime — keep at 3
+    MAX_DAILY_TOTAL_LONGS = 3       # symmetric with shorts — regime sizing handles risk
+    MAX_DAILY_TOTAL_SHORTS = 3      # symmetric with longs
     MAX_DAILY_TOTAL_LOSSES = 3      # max total losses (both directions) per day — circuit breaker
 
     # ── Entry filters — direction-specific ──────────────────────────
@@ -108,7 +108,7 @@ class OrbConfig:
     LONG_REQUIRE_VWAP = True            # zero effect (all longs already > VWAP) — keep as safety
     LONG_REQUIRE_HIGHER_CLOSE = True    # +synergy with HO+VR+MW (Sharpe 5.09 best combo)
     LONG_REQUIRE_HIGHER_OPEN = True     # +synergy with HC+VR+MW (Sharpe 5.09 best combo)
-    LONG_REQUIRE_VOLUME_RISING = True   # +synergy with HC+HO+MW (Sharpe 5.09, PSR 97.6%)
+    LONG_REQUIRE_VOLUME_RISING = False  # disabled — net-negative per short optimization, symmetric with shorts
     LONG_REQUIRE_MAX_WICK = True        # +synergy with HC+HO+VR (Sharpe 5.09, DD 1.2%)
     LONG_REQUIRE_ENTRY_WINDOW = False   # zero/negative effect for longs
 
@@ -121,8 +121,11 @@ class OrbConfig:
     SHORT_REQUIRE_MAX_WICK = True       # +$203 for shorts, blocks 68 losers at 39.7% WR
     SHORT_REQUIRE_ENTRY_WINDOW = False  # no effect
 
+    # Late-entry cutoff — no new entries after this time (prevents stale backfilled ORB breakouts)
+    LAST_ENTRY_TIME = time(10, 0)   # 10:00 AM ET — 15 min after ORB lock at 9:45
+
     # Spread filter (percentage of mid-price)
-    MAX_SPREAD_PCT = 0.24           # Max bid-ask spread as % of mid-price (optimization: 0.24 optimal)
+    MAX_SPREAD_PCT = 0.40           # Widened from 0.24 — was blocking 80%+ of entries
 
     # Shared filter parameters
     MAX_WICK_PCT = 50               # Max wick as % of body size (50 = wick can't exceed body)
@@ -130,14 +133,17 @@ class OrbConfig:
 
     # Universe source — published Google Sheets CSV URL (empty = use FORCE_DIRECTION fallback)
     UNIVERSE_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRKo9MtuEQI5a7pAxYuhbNoPX0IGtVQk347mBTNLsRWVt9FajGXqy0JYKgznqSb_w/pub?gid=1095632619&single=true&output=csv"
-
-    # Watchlist — published CSV URL of Watchlist tab (broad scanning pool for gap scanner)
     WATCHLIST_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRKo9MtuEQI5a7pAxYuhbNoPX0IGtVQk347mBTNLsRWVt9FajGXqy0JYKgznqSb_w/pub?gid=897666895&single=true&output=csv"
+
+    # Coarse universe — dynamic daily filtering from all US equities (replaces static watchlist)
+    USE_COARSE_UNIVERSE = False         # Disabled — using expanded fallback list in _load_watchlist()
+    COARSE_MIN_DOLLAR_VOLUME = 10_000_000  # $10M daily dollar volume minimum
+    COARSE_MAX_SYMBOLS = 200            # Start smaller to avoid timeout
 
     # Auto universe — Trade-Ideas exact replication
     USE_AUTO_UNIVERSE = True
-    AUTO_MIN_PRICE = 5.0                # price >= $5
-    AUTO_MIN_ADV = 2_000_000            # avg daily volume >= 2M shares
+    AUTO_MIN_PRICE = 10.0               # price >= $10 — eliminates penny-range stocks with outsized share counts
+    AUTO_MIN_ADV = 1_000_000            # avg daily volume >= 1M shares (Trade-Ideas match)
     AUTO_MIN_TODAY_VOLUME = 100_000     # today's volume >= 100K
     AUTO_MIN_ATR = 1.0                  # ATR14 >= $1
     AUTO_GAP_PCT = 0.02                 # gap >= 2% (both directions)
@@ -149,6 +155,10 @@ class OrbConfig:
     AUTO_NO_EARNINGS_TODAY = True       # exclude same-day earnings
     AUTO_MAX_PRICE = 200.0              # price <= $200 — exclude mega-priced stocks
     AUTO_MAX_SYMBOLS = 10               # cap universe per day
+
+    # Trend alignment filter — block trades against prevailing 20-day trend
+    AUTO_TREND_FILTER = True            # enable/disable
+    AUTO_TREND_RETURN_THRESHOLD = 0.05  # 5% — 20-day return must exceed this to count as trending
 
     # ── Auto Universe Scoring ─────────────────────────────────
     AUTO_MIN_COMPOSITE_SCORE = 30       # reject candidates scoring below this
@@ -205,7 +215,7 @@ class OrbConfig:
     SG_OPEX_BLOCK_DISTANT = False       # Block entries when opex_proximity = "distant"
 
     # Execution
-    SS_ENABLED = False              # Set True for paper/live — False for backtest
+    SS_ENABLED = False             # Set True for paper/live — False for backtest
     SS_PAPER_URL = "https://app.signalstack.com/hook/w3rWj74GcoTYh8MF8FoCxR"
     SS_LIVE_URL = ""                # SignalStack live webhook URL
     SS_CONFIRM_FIRST = True         # Call SS synchronously, block QC order if broker rejects
