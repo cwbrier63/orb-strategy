@@ -772,62 +772,44 @@ class OrbAlgorithm(QCAlgorithm):
 
     def on_data(self, data):
         try:
-            # ── Skip non-trading days (weekends, holidays) and outside market hours ──
+            # Skip non-trading hours
             if not self._is_trading_day():
                 return
             bar_time = self.time.time()
             if bar_time < time(9, 30) or bar_time >= time(16, 0):
                 return
 
-            # ── Late-start catch-up: run missed scheduled events (LIVE ONLY) ──
-            # Retries each bar until universe is populated or time cutoff
-            # Skip in backtest — scheduled events fire normally there
+            # Late-start catch-up (LIVE ONLY)
             if not self._catchup_done and self.live_mode:
                 has_universe = any(self.gap_qualified.get(s) for s in self.symbols)
                 catchup_cutoff = time(15, 30)  # give up after 3:30 PM (matches entry cutoff)
                 if bar_time >= time(9, 30) and not has_universe and bar_time < catchup_cutoff:
-                    # Only run daily_reset once
                     if not getattr(self, '_catchup_reset_done', False):
-                        self._log(f"[CATCHUP] Late start detected at {bar_time} — running missed events")
+                        self._log(f"[CATCHUP] Late start at {bar_time}")
                         self.daily_reset()
-                        # daily_reset clears _catchup_done; do NOT re-clear it here
                         self._catchup_reset_done = True
-                    # Try sheet first
                     if self.config.UNIVERSE_SHEET_URL and not self._sheet_loaded_today:
-                        self._log("[CATCHUP] Running load_universe_from_sheet (missed 9:15)")
                         self.load_universe_from_sheet()
-                    # Then gap scanner if sheet didn't provide symbols
                     if self.config.USE_AUTO_UNIVERSE and not self._sheet_loaded_today:
-                        self._log("[CATCHUP] Running run_gap_scanner (missed 9:20)")
                         self.run_gap_scanner()
-                    # SpotGamma current-day load (only once)
                     if self.sg_mgr and self.config.SG_ENABLED and not getattr(self, '_catchup_sg_done', False):
-                        self._log("[CATCHUP] Running SG load_current_day (missed 9:20)")
                         self.sg_mgr.load_current_day()
                         self._catchup_sg_done = True
-                    # Check if we got symbols now
                     has_universe = any(self.gap_qualified.get(s) for s in self.symbols)
                     if has_universe:
                         self._catchup_done = True
-                        qualified = [s for s in self.symbols if self.gap_qualified.get(s)]
-                        self.log(f"[CATCHUP] Universe populated — {len(qualified)} symbols qualified")
-                        self._log(f"[CATCHUP] Universe populated — catchup complete")
-                        # Backfill ORB ranges if we missed the ORB window
+                        self._log("[CATCHUP] Universe populated")
                         orb_lock = max(self.config.LONG_ORB_CLOSE_TIME, self.config.SHORT_ORB_CLOSE_TIME)
                         if bar_time >= orb_lock:
-                            qualified = [s for s in self.symbols if self.gap_qualified.get(s)]
-                            self._log(f"[CATCHUP] Backfilling ORB for {len(qualified)} symbols (missed ORB window)")
-                            for sym in qualified:
+                            for sym in [s for s in self.symbols if self.gap_qualified.get(s)]:
                                 if not self.orb.is_locked(sym):
                                     try:
-                                        hist = self.history(sym, 30, Resolution.MINUTE)
-                                        self.orb.backfill(sym, hist)
-                                    except Exception as e:
-                                        self._log(f"[CATCHUP] ORB backfill failed for {sym}: {e}")
+                                        self.orb.backfill(sym, self.history(sym, 30, Resolution.MINUTE))
+                                    except:
+                                        pass
                 elif bar_time >= catchup_cutoff and not has_universe:
                     self._catchup_done = True
-                    self.log(f"[CATCHUP] Giving up at {bar_time} — no universe found")
-                    self._log(f"[CATCHUP] Giving up at {bar_time} — no universe found")
+                    self._log(f"[CATCHUP] Giving up at {bar_time}")
 
             self.check_daily_pnl()
 
@@ -835,33 +817,17 @@ class OrbAlgorithm(QCAlgorithm):
                 return
 
             # Daily diagnostic: log symbol states once at 9:46 (1 min after ORB lock)
-            if bar_time == time(9, 46) and not getattr(self, '_diag_done_today', False):
+            if bar_time == time(9, 46) and not self._diag_done_today:
                 self._diag_done_today = True
-                n_syms = len(self.symbols)
-                n_orb = sum(1 for s in self.symbols if self.orb.is_locked(s))
-                n_ind = sum(1 for s in self.symbols if s in self.indicators.atr and self.indicators.is_ready(s))
-                n_gq = sum(1 for s in self.symbols if self.gap_qualified.get(s))
-                n_dir = sum(1 for s in self.symbols if self.symbol_direction.get(s) is not None)
-                n_meta = sum(1 for s in self.symbols if self.symbol_meta.get(s) is not None)
-                self._log(
-                    f"[DIAG 9:46] symbols={n_syms} orb_locked={n_orb} ind_ready={n_ind} "
-                    f"gap_qual={n_gq} dir_set={n_dir} has_meta={n_meta}"
-                )
-                # Log first 5 symbols with full state for debugging
-                for s in self.symbols[:5]:
-                    orb_h = self.orb.get_high(s)
-                    orb_l = self.orb.get_low(s)
-                    locked = self.orb.is_locked(s)
-                    ind_ok = s in self.indicators.atr and self.indicators.is_ready(s)
-                    gq = self.gap_qualified.get(s)
-                    d = self.symbol_direction.get(s)
-                    meta = self.symbol_meta.get(s)
-                    has_bar = data.bars.contains_key(s)
-                    price = data.bars[s].close if has_bar else 0
-                    self._log(
-                        f"[DIAG] {s} locked={locked} ind={ind_ok} gq={gq} dir={d} "
-                        f"meta={meta is not None} orb_h={orb_h} orb_l={orb_l} price={price}"
-                    )
+                ss = self.symbols
+                n_orb = sum(1 for s in ss if self.orb.is_locked(s))
+                n_ind = sum(1 for s in ss if s in self.indicators.atr and self.indicators.is_ready(s))
+                n_gq = sum(1 for s in ss if self.gap_qualified.get(s))
+                n_dir = sum(1 for s in ss if self.symbol_direction.get(s))
+                self._log(f"[DIAG] syms={len(ss)} orb={n_orb} ind={n_ind} gq={n_gq} dir={n_dir}")
+                for s in ss[:5]:
+                    p = data.bars[s].close if data.bars.contains_key(s) else 0
+                    self._log(f"[DIAG] {s} lk={self.orb.is_locked(s)} ir={s in self.indicators.atr and self.indicators.is_ready(s)} gq={self.gap_qualified.get(s)} d={self.symbol_direction.get(s)} oh={self.orb.get_high(s)} ol={self.orb.get_low(s)} p={p}")
 
             for symbol in self.symbols:
                 if not data.bars.contains_key(symbol):
