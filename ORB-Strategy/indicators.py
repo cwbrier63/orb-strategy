@@ -17,6 +17,11 @@ class IndicatorManager:
         self.ema_mid[symbol] = self.algo.ema(symbol, self.config.EMA_MID)
         self.ema_slow[symbol] = self.algo.ema(symbol, self.config.EMA_SLOW)
         self.atr[symbol] = self.algo.atr(symbol, self.config.ATR_PERIOD)
+        # Warm up indicators with historical data so they're ready immediately
+        warmup = max(self.config.EMA_SLOW, self.config.ATR_PERIOD) + 5
+        for ind in [self.ema_fast[symbol], self.ema_mid[symbol],
+                    self.ema_slow[symbol], self.atr[symbol]]:
+            self.algo.warm_up_indicator(symbol, ind, Resolution.DAILY)
 
     def is_ready(self, symbol):
         return (
