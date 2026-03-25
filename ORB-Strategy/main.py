@@ -567,6 +567,8 @@ class OrbAlgorithm(QCAlgorithm):
                     "max_dd": c.get("max_dd", -0.06),
                 }
                 self.gap_qualified[sym] = True
+                # Set symbol_direction from symbol_meta (mirrors sheet loader line 313-314)
+                self._tag_direction(sym)
                 bt = c.get("bt_stats", {})
                 bt_str = f" WR={bt.get('win_rate', 0):.0%} exp={bt.get('expectancy', 0):.3f}" if bt else ""
                 self.debug(
@@ -605,7 +607,9 @@ class OrbAlgorithm(QCAlgorithm):
             except:
                 pass
 
-            self._log(f"[GAP_SCANNER] Selected {len(scored)} symbols")
+            n_long = sum(1 for c in scored if c["direction"] == "LONG")
+            n_short = sum(1 for c in scored if c["direction"] == "SHORT")
+            self._log(f"[GAP_SCANNER] Selected {len(scored)} symbols (L:{n_long} S:{n_short})")
 
         except Exception as e:
             self._log(f"[GAP_SCANNER ERROR] {str(e)}")
