@@ -567,6 +567,8 @@ class OrbAlgorithm(QCAlgorithm):
                     "max_dd": c.get("max_dd", -0.06),
                 }
                 self.gap_qualified[sym] = True
+                self.symbol_direction[sym] = c["direction"]
+                self.signal_engine.set_gap_pct(sym, c["gap_pct"])
                 bt = c.get("bt_stats", {})
                 bt_str = f" WR={bt.get('win_rate', 0):.0%} exp={bt.get('expectancy', 0):.3f}" if bt else ""
                 self.debug(
@@ -676,6 +678,7 @@ class OrbAlgorithm(QCAlgorithm):
         self._catchup_done = False
         self._catchup_reset_done = False
         self._catchup_sg_done = False
+        self._diag_done_today = False
         self._spread_rejected_today.clear()
         self._alloc_rejected_today.clear()
         self._actual_entry_fills.clear()
@@ -830,6 +833,35 @@ class OrbAlgorithm(QCAlgorithm):
 
             if self.daily_halt:
                 return
+
+            # Daily diagnostic: log symbol states once at 9:46 (1 min after ORB lock)
+            if bar_time == time(9, 46) and not getattr(self, '_diag_done_today', False):
+                self._diag_done_today = True
+                n_syms = len(self.symbols)
+                n_orb = sum(1 for s in self.symbols if self.orb.is_locked(s))
+                n_ind = sum(1 for s in self.symbols if s in self.indicators.atr and self.indicators.is_ready(s))
+                n_gq = sum(1 for s in self.symbols if self.gap_qualified.get(s))
+                n_dir = sum(1 for s in self.symbols if self.symbol_direction.get(s) is not None)
+                n_meta = sum(1 for s in self.symbols if self.symbol_meta.get(s) is not None)
+                self._log(
+                    f"[DIAG 9:46] symbols={n_syms} orb_locked={n_orb} ind_ready={n_ind} "
+                    f"gap_qual={n_gq} dir_set={n_dir} has_meta={n_meta}"
+                )
+                # Log first 5 symbols with full state for debugging
+                for s in self.symbols[:5]:
+                    orb_h = self.orb.get_high(s)
+                    orb_l = self.orb.get_low(s)
+                    locked = self.orb.is_locked(s)
+                    ind_ok = s in self.indicators.atr and self.indicators.is_ready(s)
+                    gq = self.gap_qualified.get(s)
+                    d = self.symbol_direction.get(s)
+                    meta = self.symbol_meta.get(s)
+                    has_bar = data.bars.contains_key(s)
+                    price = data.bars[s].close if has_bar else 0
+                    self._log(
+                        f"[DIAG] {s} locked={locked} ind={ind_ok} gq={gq} dir={d} "
+                        f"meta={meta is not None} orb_h={orb_h} orb_l={orb_l} price={price}"
+                    )
 
             for symbol in self.symbols:
                 if not data.bars.contains_key(symbol):
