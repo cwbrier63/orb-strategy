@@ -332,9 +332,10 @@ class UniverseScorer:
         exp = bt["expectancy"]
         trades = bt["trades"]
 
-        # Need minimum trades to be meaningful
-        if trades < 5:
-            return 2, -0.06  # default tier if insufficient data
+        # Need minimum trades to be meaningful — reject if too few
+        min_trades = getattr(cfg, "AUTO_MINI_BT_MIN_TRADES", 8)
+        if trades < min_trades:
+            return 0, 0  # REJECT — insufficient history to trust
 
         t1_wr = getattr(cfg, "AUTO_TIER1_MIN_WIN_RATE", 0.50)
         t1_exp = getattr(cfg, "AUTO_TIER1_MIN_EXPECTANCY", 0.30)

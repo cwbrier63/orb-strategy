@@ -146,7 +146,7 @@ class OrbConfig:
     AUTO_MIN_ADV = 1_000_000            # avg daily volume >= 1M shares (Trade-Ideas match)
     AUTO_MIN_TODAY_VOLUME = 100_000     # today's volume >= 100K
     AUTO_MIN_ATR = 1.0                  # ATR14 >= $1
-    AUTO_GAP_PCT = 0.02                 # gap >= 2% (both directions)
+    AUTO_GAP_PCT = 0.02                 # gap >= 2% — lower threshold produces weaker breakouts
     AUTO_MAX_GAP_PCT = 0.10             # cap at 10% — exclude binary event runaway gaps
     AUTO_MAX_SHORT_FLOAT = 0.20         # short float <= 20%
     AUTO_MIN_FLOAT_SHARES = 1_000_000   # float >= 1M shares
@@ -171,12 +171,13 @@ class OrbConfig:
     # Mini-backtester params
     AUTO_MINI_BT_DAYS = 30              # days of 1-min history for mini-backtest
     AUTO_MINI_BT_TIMEOUT = 5.0          # per-symbol timeout (seconds)
-    AUTO_TIER1_MIN_WIN_RATE = 0.50
+    AUTO_MINI_BT_MIN_TRADES = 8         # reject if fewer than N historical trades (was 5, defaulting to T2)
+    AUTO_TIER1_MIN_WIN_RATE = 0.52
     AUTO_TIER1_MIN_EXPECTANCY = 0.30
-    AUTO_TIER2_MIN_WIN_RATE = 0.40
-    AUTO_TIER2_MIN_EXPECTANCY = 0.10
-    AUTO_TIER3_MIN_WIN_RATE = 0.30
-    AUTO_TIER3_MIN_EXPECTANCY = 0.00
+    AUTO_TIER2_MIN_WIN_RATE = 0.42
+    AUTO_TIER2_MIN_EXPECTANCY = 0.15
+    AUTO_TIER3_MIN_WIN_RATE = 0.35
+    AUTO_TIER3_MIN_EXPECTANCY = 0.05
 
     # Gap sustainability check
     AUTO_GAP_MIN_RETENTION = 0.40       # downgrade if gap retained < 40%
