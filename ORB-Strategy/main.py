@@ -15,16 +15,15 @@ from universe_scorer import UniverseScorer
 
 class OrbAlgorithm(QCAlgorithm):
     def initialize(self):
-        # Log buffer MUST be initialized first — before anything calls self._log()
         self._log_buffer = []
-
         self.config = OrbConfig()
         self._apply_parameters()
 
         self.set_start_date(2025, 1, 1)
-        self.set_end_date(2026, 3, 10)
+        self.set_end_date(2026, 3, 28)
         self.set_cash(self.config.ACCOUNT_SIZE)
 
+        self._run_tag = self.time.strftime("%Y%m%d_%H%M%S")
         self.set_brokerage_model(BrokerageName.INTERACTIVE_BROKERS_BROKERAGE, AccountType.MARGIN)
 
         # Modules
@@ -90,6 +89,10 @@ class OrbAlgorithm(QCAlgorithm):
         # Order fill tracking — correct entry prices using actual fills
         self._entry_order_ids = {}    # order_id -> symbol
         self._actual_entry_fills = {} # symbol -> fill_price
+
+        # Exit fill tracking — defer PnL calc until actual fill price arrives
+        self._exit_order_ids = {}     # order_id -> symbol
+        self._pending_exits = {}      # symbol -> {entry_price, is_long, quantity, reason}
 
         # Daily rejection buffer for ObjectStore CSV
         self._all_reject_rows = []
@@ -299,18 +302,18 @@ class OrbAlgorithm(QCAlgorithm):
                     self.indicators.register(symbol)
                 self.max_dd[symbol] = meta["max_dd"]
                 self.symbol_meta[symbol] = meta
-                self._log(f"[UNIVERSE LOADED] {ticker} {meta['direction']} T{meta['tier']} maxdd={meta['max_dd']}")
+                self.debug(f"[UNIV] {ticker} {meta['direction']} T{meta['tier']}")
 
             # Remove symbols from previous day that aren't in today's list
             stale = [s for s in self.symbols if s not in new_symbol_objects]
             for s in stale:
-                self.symbols.remove(s)
-                self.max_dd.pop(s, None)
-                self.symbol_meta.pop(s, None)
-                self._log(f"[UNIVERSE REMOVED] {s}")
+                self.symbols.remove(s); self.max_dd.pop(s, None); self.symbol_meta.pop(s, None)
 
-            # Tag direction and set gap_qualified for all loaded symbols
+            # Fetch prior close and tag direction for all loaded symbols
             for sym in list(new_symbol_objects):
+                hist = self.history(sym, 2, Resolution.DAILY)
+                if not hist.empty and len(hist) >= 1:
+                    self.prior_close[sym] = hist["close"].iloc[-1]
                 self._tag_direction(sym)
 
             self._log(f"[UNIVERSE] Loaded {len(today_symbols)} symbols for {today_str}")
@@ -516,11 +519,13 @@ class OrbAlgorithm(QCAlgorithm):
                 self._log("[GAP_SCANNER] No candidates passed composite scoring")
                 return
 
-            # Phase 2: Mini-backtest for auto tier assignment
-            scored = self.scorer.run_mini_backtests(scored)
-            if not scored:
-                self._log("[GAP_SCANNER] All candidates rejected by mini-backtest")
-                return
+            if getattr(cfg, 'AUTO_MINI_BT_ENABLED', True):
+                scored = self.scorer.run_mini_backtests(scored)
+                if not scored:
+                    self._log("[GAP_SCANNER] All rejected by mini-backtest")
+                    return
+            else:
+                for c in scored: c["tier"] = 3; c["max_dd"] = -0.06
 
             # Trend filter on scored winners only (not all 200 candidates — avoids timeout)
             if cfg.AUTO_TREND_FILTER:
@@ -568,6 +573,7 @@ class OrbAlgorithm(QCAlgorithm):
                 }
                 self.gap_qualified[sym] = True
                 self.symbol_direction[sym] = c["direction"]
+                self.prior_close[sym] = prev_closes.get(sym, 0)
                 self.signal_engine.set_gap_pct(sym, c["gap_pct"])
                 bt = c.get("bt_stats", {})
                 bt_str = f" WR={bt.get('win_rate', 0):.0%} exp={bt.get('expectancy', 0):.3f}" if bt else ""
@@ -587,7 +593,7 @@ class OrbAlgorithm(QCAlgorithm):
                     for c in scored
                 ]
                 csv_str = "date,symbol,gap_pct,atr,adv,direction,score,tier,max_dd\n" + "\n".join(rows)
-                self.object_store.save(f"auto_universe_{date_str}.csv", csv_str)
+                self.object_store.save("auto_universe.csv", csv_str)
             except:
                 pass
 
@@ -683,17 +689,21 @@ class OrbAlgorithm(QCAlgorithm):
         self._alloc_rejected_today.clear()
         self._actual_entry_fills.clear()
         self._entry_order_ids.clear()
+        # Safety net: flush pending exits that missed fill events
+        self._flush_pending_exits()
+        self._exit_order_ids.clear()
         self.day_start_equity = self.portfolio.total_portfolio_value
+        # Reset daily state for all symbols — scanner/sheet will re-qualify at 9:15/9:20
         for symbol in self.symbols:
             self.orb.reset(symbol)
             self.symbol_direction[symbol] = None
             self.gap_qualified[symbol] = False
-
-            # Get prior daily close and tag direction based on gap
             hist = self.history(symbol, 2, Resolution.DAILY)
-            if hist.empty or len(hist) < 1:
-                continue
-            self.prior_close[symbol] = hist["close"].iloc[-1]
+            if not hist.empty and len(hist) >= 1:
+                self.prior_close[symbol] = hist["close"].iloc[-1]
+        # Clear auto-scanner state so new candidates replace old ones
+        self.auto_universe_candidates.clear()
+        self.symbol_meta.clear()
 
     def _tag_direction(self, symbol):
         """Tag symbol as LONG or SHORT based on symbol_meta, FORCE_DIRECTION, or gap."""
@@ -951,6 +961,17 @@ class OrbAlgorithm(QCAlgorithm):
         spread = ask - bid if bid > 0 and ask > 0 else 0
         mid = (bid + ask) / 2 if bid > 0 and ask > 0 else 0
         spread_pct = (spread / mid * 100) if mid > 0 else 0
+        rvol = 0.0
+        try:
+            ct = self.time.time()
+            h = self.history(symbol, timedelta(days=21), Resolution.MINUTE)
+            if not h.empty:
+                h = h[h.index.get_level_values(1).time == ct]
+                if len(h) >= 3:
+                    av = h["volume"].mean()
+                    if av > 0: rvol = round(bar.volume/av, 2)
+        except: pass
+
         return {
             "vwap": self.indicators.get_vwap(symbol),
             "ema9": self.indicators.get_ema_fast(symbol),
@@ -966,6 +987,7 @@ class OrbAlgorithm(QCAlgorithm):
             "bar_range": bar.high - bar.low,
             "spread": spread,
             "spread_pct": spread_pct,
+            "rvol": rvol,
         }
 
     def _build_sg_snapshot(self, symbol):
@@ -1151,60 +1173,53 @@ class OrbAlgorithm(QCAlgorithm):
             return
 
         is_long = self.trade_mgr.is_long(symbol)
-        # Use actual fill price for entry if available, else bar.close estimate
         entry_price = self._actual_entry_fills.get(symbol, self.trade_mgr.entries[symbol]["price"])
         quantity = abs(self.portfolio[symbol].quantity)
 
-        # Compute PnL using best available entry price (actual fill or bar.close)
-        if is_long:
-            pnl = (price - entry_price) * quantity
-        else:
-            pnl = (entry_price - price) * quantity
+        # Store pending exit — PnL will be computed in on_order_event with actual fill price
+        self._pending_exits[symbol] = {
+            "entry_price": entry_price,
+            "is_long": is_long,
+            "quantity": quantity,
+            "reason": reason,
+            "signal_price": price,
+        }
 
-        # Track wins/losses for optimization scoring
-        if pnl > 0:
-            self.total_wins += 1
-            self.total_profit += pnl
-        else:
-            self.total_losses += 1
-            self.total_loss_amt += abs(pnl)
-
-        # Track losses per direction (per-symbol)
-        if pnl < 0:
-            self.risk_mgr.record_loss(symbol, is_long=is_long)
-
-        # Finalize trade record with computed PnL
-        record = self.trade_mgr.finalize_record(symbol, price, self.time, pnl, quantity, reason)
-        if record:
-            row = TradeManager.format_record_row(record)
-            self.trade_log_rows.append(row)
-
-        # Release capital allocation and close position tracking
+        # Release capital allocation and close position tracking (doesn't need exit fill)
         self.risk_mgr.remove_allocation(quantity, entry_price)
         self.risk_mgr.close_position(symbol)
 
-        # SignalStack confirm-first for exits — send before QC liquidate
         action = "sell" if is_long else "buy_to_cover"
         if self.config.SS_ENABLED and self.config.SS_CONFIRM_FIRST:
-            success, ss_resp = self.bridge.send_and_confirm(str(symbol), action, quantity)
-            if not success:
-                self._log(f"[SS_EXIT_FAIL] {symbol} — broker rejected exit: {ss_resp}")
+            ok, resp = self.bridge.send_and_confirm(str(symbol), action, quantity)
+            if not ok:
+                self._log(f"[SS_EXIT_FAIL] {symbol}: {resp}")
                 if self.config.SS_RETRY_EXITS:
-                    success2, ss_resp2 = self.bridge.send_and_confirm(str(symbol), action, quantity)
-                    if success2:
-                        self._log(f"[SS_EXIT_RETRY_OK] {symbol}")
-                    else:
-                        self._log(f"[SS_EXIT_RETRY_FAIL] {symbol} — MANUAL INTERVENTION NEEDED: {ss_resp2}")
+                    ok2, r2 = self.bridge.send_and_confirm(str(symbol), action, quantity)
+                    self._log(f"[SS_RETRY] {symbol} {'OK' if ok2 else 'FAIL: '+str(r2)}")
 
-        self.liquidate(symbol, tag=reason)
-        self.trade_mgr.remove(symbol)
+        for t in (self.liquidate(symbol, tag=reason) or []):
+            self._exit_order_ids[t.order_id] = symbol
 
         if not (self.config.SS_ENABLED and self.config.SS_CONFIRM_FIRST):
             self.bridge.send(str(symbol), action, quantity)
-        self._log(f"[EXIT] {symbol} reason={reason} action={action} qty={quantity} price={price:.2f} pnl={pnl:.2f}")
+        self._log(f"[EXIT] {symbol} reason={reason} action={action} qty={quantity} signal_price={price:.2f}")
+
+    def _flush_pending_exits(self):
+        """Safety net: finalize any pending exits that didn't receive a fill event."""
+        for sym, p in list(self._pending_exits.items()):
+            self._log(f"[EXIT ORPHAN] {sym} using signal_price={p['signal_price']:.2f}")
+            pnl = (p['signal_price'] - p['entry_price']) * p['quantity'] if p['is_long'] else (p['entry_price'] - p['signal_price']) * p['quantity']
+            if pnl > 0: self.total_wins += 1; self.total_profit += pnl
+            else: self.total_losses += 1; self.total_loss_amt += abs(pnl)
+            if pnl < 0: self.risk_mgr.record_loss(sym, is_long=p['is_long'])
+            rec = self.trade_mgr.finalize_record(sym, p['signal_price'], self.time, pnl, p['quantity'], p['reason'])
+            if rec: self.trade_log_rows.append(TradeManager.format_record_row(rec))
+            self.trade_mgr.remove(sym)
+        self._pending_exits.clear()
 
     def on_order_event(self, order_event):
-        """Capture actual entry fill prices to correct entry price and hard stop."""
+        """Capture actual fill prices for both entries and exits."""
         if order_event.status != OrderStatus.FILLED:
             return
 
@@ -1238,53 +1253,51 @@ class OrbAlgorithm(QCAlgorithm):
                     rec["hard_stop"] = round(entry["hard_stop"], 2)
             del self._entry_order_ids[oid]
 
+        # Exit fill — match by pending exit (liquidate() may not return tickets)
+        elif symbol in self._pending_exits:
+            pending = self._pending_exits[symbol]
+            entry_price = pending["entry_price"]
+            is_long = pending["is_long"]
+            quantity = pending["quantity"]
+            reason = pending["reason"]
+
+            if is_long:
+                pnl = (fill_price - entry_price) * quantity
+            else:
+                pnl = (entry_price - fill_price) * quantity
+
+            if pnl > 0:
+                self.total_wins += 1
+                self.total_profit += pnl
+            else:
+                self.total_losses += 1
+                self.total_loss_amt += abs(pnl)
+            if pnl < 0:
+                self.risk_mgr.record_loss(symbol, is_long=is_long)
+
+            record = self.trade_mgr.finalize_record(symbol, fill_price, self.time, pnl, quantity, reason)
+            if record:
+                self.trade_log_rows.append(TradeManager.format_record_row(record))
+
+            self.trade_mgr.remove(symbol)
+            slip = abs(fill_price - pending["signal_price"])
+            self._log(f"[EXIT FILL] {symbol} fill={fill_price:.2f} signal={pending['signal_price']:.2f} slip={slip:.2f} pnl={pnl:.2f}")
+            del self._pending_exits[symbol]
+            self._exit_order_ids.pop(oid, None)
+
     def on_end_of_algorithm(self):
         try:
             starting_cash = self.config.ACCOUNT_SIZE
 
-            # Hard disqualifiers — log warnings only (optimizer uses QC built-in metrics)
-            if self.max_drawdown_dollars > starting_cash * 0.03:
-                self._log(f"[EOA WARNING] Max drawdown ${self.max_drawdown_dollars:.2f} exceeded 3% of account")
-            if self.worst_daily_loss > starting_cash * 0.02:
-                self._log(f"[EOA WARNING] Worst daily loss ${self.worst_daily_loss:.2f} exceeded 2% of account")
-
-            # Flush final day's rejections
-            day_rejects = self.signal_engine.get_and_clear_reject_buffer()
-            self._all_reject_rows.extend(day_rejects)
-
-            # Filter rejection summary — compact single-line format for QC log
-            rejects = self.signal_engine.get_reject_counts()
-            candidates = self.signal_engine.get_breakout_candidates()
-            self._log(
-                f"[FILTER_SUMMARY] candidates={candidates} entries={len(self.trade_log_rows)} "
-                f"spread_rejects={len(self._spread_rejected_today)} "
-                f"| GAP_DIR={rejects.get('GAP_DIRECTION', 0)} EMA={rejects.get('EMA_ALIGN', 0)} "
-                f"VWAP={rejects.get('VWAP', 0)} HC={rejects.get('HIGHER_CLOSE', 0)} "
-                f"HO={rejects.get('HIGHER_OPEN', 0)} VR={rejects.get('VOLUME_RISING', 0)} "
-                f"WICK={rejects.get('WICK', 0)} EW={rejects.get('ENTRY_WINDOW', 0)} "
-                f"TIME={rejects.get('TIME_CUTOFF', 0)} ATR0={rejects.get('ATR_ZERO', 0)} "
-                f"SG_GAMMA={rejects.get('SG_GAMMA_REGIME', 0)} SG_CONV={rejects.get('SG_CONVICTION', 0)} "
-                f"SG_RANGE={rejects.get('SG_RANGE_VALIDATION', 0)} SG_OPEX={rejects.get('SG_OPEX', 0)}"
-            )
-
-            # Write trade log CSV to ObjectStore
+            self._all_reject_rows.extend(self.signal_engine.get_and_clear_reject_buffer())
+            r = self.signal_engine.get_reject_counts()
+            self._log(f"[FILTERS] entries={len(self.trade_log_rows)} " + " ".join(f"{k}={v}" for k, v in r.items() if v > 0))
             self._write_trade_log()
-
-            # Write rejection detail CSV to ObjectStore
             self._write_reject_log()
-
-            # Write runtime log to ObjectStore
             self._write_runtime_log()
-
-            # Minimal QC terminal output (stays within daily quota)
             total_pnl = self.total_profit - self.total_loss_amt
             qc_pnl = self.portfolio.total_profit
-            self._log(f"[SUMMARY] W:{self.total_wins} L:{self.total_losses} PnL:${total_pnl:.2f} QC_PnL:${qc_pnl:.2f}")
-            self.log(
-                f"[DONE] {len(self.trade_log_rows)} trades | W:{self.total_wins} L:{self.total_losses} "
-                f"PnL:${total_pnl:.2f} QC:${qc_pnl:.2f} | DD:{self.max_drawdown_dollars:.2f} | "
-                f"Files: trade_log.csv, reject_log.csv, runtime_log.txt in ObjectStore"
-            )
+            self.log(f"[DONE] {len(self.trade_log_rows)} trades W:{self.total_wins} L:{self.total_losses} PnL:${total_pnl:.2f} QC:${qc_pnl:.2f} DD:{self.max_drawdown_dollars:.2f}")
         except Exception as e:
             self.log(f"[EOA ERROR] {str(e)}")
 
@@ -1296,12 +1309,9 @@ class OrbAlgorithm(QCAlgorithm):
         header = ','.join(TRADE_LOG_COLUMNS)
         csv_content = header + '\n' + '\n'.join(self.trade_log_rows)
 
-        timestamp = self.time.strftime("%Y%m%d_%H%M%S")
-        key_versioned = f"trade_log_{timestamp}.csv"
-        key_latest = "trade_log.csv"
-        self.object_store.save(key_versioned, csv_content)
-        self.object_store.save(key_latest, csv_content)
-        self._log(f"[TRADE_LOG] {len(self.trade_log_rows)} trades → ObjectStore ({key_versioned})")
+        key = f"trade_log_{self._run_tag}.csv"
+        self.object_store.save(key, csv_content)
+        self._log(f"[TRADE_LOG] {len(self.trade_log_rows)} trades → {key}")
 
         # Compact summary
         total_pnl = self.total_profit - self.total_loss_amt
@@ -1322,10 +1332,8 @@ class OrbAlgorithm(QCAlgorithm):
             )
         csv_content = '\n'.join(rows)
 
-        timestamp = self.time.strftime("%Y%m%d_%H%M%S")
-        self.object_store.save(f"reject_log_{timestamp}.csv", csv_content)
-        self.object_store.save("reject_log.csv", csv_content)
-        self._log(f"[REJECT_LOG] {len(self._all_reject_rows)} rejections → ObjectStore")
+        self.object_store.save(f"reject_log_{self._run_tag}.csv", csv_content)
+        self._log(f"[REJECT_LOG] {len(self._all_reject_rows)} rejections → reject_log_{self._run_tag}.csv")
 
     def _write_runtime_log(self):
         """Write full runtime log to ObjectStore as a text file."""
@@ -1333,7 +1341,4 @@ class OrbAlgorithm(QCAlgorithm):
             return
 
         log_content = '\n'.join(self._log_buffer)
-
-        timestamp = self.time.strftime("%Y%m%d_%H%M%S")
-        self.object_store.save(f"runtime_log_{timestamp}.txt", log_content)
-        self.object_store.save("runtime_log.txt", log_content)
+        self.object_store.save(f"runtime_log_{self._run_tag}.txt", log_content)

@@ -119,6 +119,7 @@ def apply_parameters(algo):
     _bool("long_require_volume_rising", "LONG_REQUIRE_VOLUME_RISING")
     _bool("long_require_max_wick", "LONG_REQUIRE_MAX_WICK")
     _bool("long_require_entry_window", "LONG_REQUIRE_ENTRY_WINDOW")
+    _float("long_max_ema_stretch", "LONG_MAX_EMA_STRETCH")
 
     # ── Short entry filters ──
     _bool("short_require_ema_align", "SHORT_REQUIRE_EMA_ALIGN")
@@ -128,6 +129,7 @@ def apply_parameters(algo):
     _bool("short_require_volume_rising", "SHORT_REQUIRE_VOLUME_RISING")
     _bool("short_require_max_wick", "SHORT_REQUIRE_MAX_WICK")
     _bool("short_require_entry_window", "SHORT_REQUIRE_ENTRY_WINDOW")
+    _float("short_max_ema_stretch", "SHORT_MAX_EMA_STRETCH")
 
     # ── Spread & wick filter parameters ──
     _float("max_spread_pct", "MAX_SPREAD_PCT")

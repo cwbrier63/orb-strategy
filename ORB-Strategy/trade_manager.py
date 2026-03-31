@@ -47,7 +47,7 @@ TRADE_LOG_COLUMNS = [
     'u_no_earnings_today', 'u_max_symbols', 'u_max_price',
     # Group 7: Real-Time Entry Bar Data
     'prior_close', 'today_open',
-    'entry_bar_volume', 'entry_bar_range', 'entry_spread', 'entry_spread_pct',
+    'entry_bar_volume', 'entry_bar_range', 'entry_spread', 'entry_spread_pct', 'entry_rvol',
     'p_max_spread_pct',
     # Group 8: Counterfactual Entry Filter Evaluation (raw pass/fail at entry)
     'cf_gap_direction_pass', 'cf_ema_align_pass', 'cf_vwap_pass',
@@ -63,6 +63,9 @@ TRADE_LOG_COLUMNS = [
     'cf_vwap_recross_price', 'cf_vwap_recross_hit',
     'cf_ema_cross_at_entry', 'cf_ema9_minus_ema20',
     'cf_breakeven_price', 'cf_above_breakeven_at_exit',
+    # Group 9b: Per-Bar PnL Snapshots (unrealized PnL $ at bar N)
+    'pnl_bar5', 'pnl_bar10', 'pnl_bar15', 'pnl_bar20', 'pnl_bar25', 'pnl_bar30',
+    'pnl_at_trail_activation',
     # Group 10: Take Profit Tracking
     'tp1_price', 'tp1_hit', 'tp1_shares', 'tp1_fill_price',
     'tp2_price', 'tp2_hit', 'tp2_shares', 'tp2_fill_price',
@@ -203,6 +206,8 @@ class TradeManager:
             if peak_profit >= entry["activation_threshold"]:
                 entry["trail_activated"] = True
                 just_activated = True
+                if symbol in self.open_records:
+                    self.open_records[symbol]['pnl_at_trail_activation'] = round(peak_profit, 4)
                 self.algo.debug(f"[TRAIL ACTIVATED] {symbol} profit={peak_profit:.2f} threshold={entry['activation_threshold']:.2f}")
 
         # ── STEP 2b: Breakeven stop — move hard stop to entry when R-trigger is hit ──
@@ -253,6 +258,20 @@ class TradeManager:
                 else:
                     self.algo._log(f"[VWAP RECROSS] {symbol} SHORT close={bar_close:.2f} vwap={vwap_current:.2f} consecutive={entry['vwap_wrong_side_bars']}")
                 return True, "VWAP_RECROSS"
+
+        # ── STEP 4c: Bar-5 stall exit — cut if negative after N bars ──
+        if getattr(self.config, 'USE_STALL_EXIT', False) and atr > 0:
+            stall_bars = getattr(self.config, 'STALL_EXIT_BARS', 5)
+            stall_thresh = getattr(self.config, 'STALL_EXIT_ATR_THRESHOLD', 0.10)
+            rec = self.open_records.get(symbol)
+            if rec and rec['duration_bars'] >= stall_bars and not entry.get("trail_activated", False):
+                if is_long:
+                    unrealized_atr = (bar_close - entry_price) / atr
+                else:
+                    unrealized_atr = (entry_price - bar_close) / atr
+                if unrealized_atr < -stall_thresh:
+                    self.algo._log(f"[STALL EXIT] {symbol} bar={rec['duration_bars']} pnl_atr={unrealized_atr:.3f}")
+                    return True, "STALL_EXIT"
 
         # ── STEP 4b: Hard stop check (uses bar_low for LONG, bar_high for SHORT) ──
         hard_stop = entry["hard_stop"]
@@ -502,6 +521,10 @@ class TradeManager:
             'highest': entry_price,
             'lowest': entry_price,
             'reason': '',
+            # Group 9b: Per-Bar PnL Snapshots
+            'pnl_bar5': '', 'pnl_bar10': '', 'pnl_bar15': '',
+            'pnl_bar20': '', 'pnl_bar25': '', 'pnl_bar30': '',
+            'pnl_at_trail_activation': '',
             # Group 2: Stop State at Exit
             'trail_activated': False,
             'trail_stop': 0.0,
@@ -593,6 +616,7 @@ class TradeManager:
             'entry_bar_range': round(snapshot.get('bar_range', 0), 4),
             'entry_spread': round(snapshot.get('spread', 0), 4),
             'entry_spread_pct': round(snapshot.get('spread_pct', 0), 4),
+            'entry_rvol': snapshot.get('rvol', 0.0),
             'p_max_spread_pct': config.MAX_SPREAD_PCT,
             # Group 8: Counterfactual Entry Filter Evaluation
             'cf_gap_direction_pass': fe.get('cf_gap_direction_pass', True),
@@ -712,6 +736,16 @@ class TradeManager:
         else:
             rec['mfe'] = max(0, entry_price - rec['_low_extreme'])
             rec['mae'] = max(0, rec['_high_extreme'] - entry_price)
+
+        # Per-bar PnL snapshots at intervals
+        bars = rec['duration_bars']
+        if bars in (5, 10, 15, 20, 25, 30):
+            shares = rec.get('shares', 0)
+            if is_long:
+                snap_pnl = round((bar_close - entry_price) * shares, 2)
+            else:
+                snap_pnl = round((entry_price - bar_close) * shares, 2)
+            rec[f'pnl_bar{bars}'] = snap_pnl
 
         # Sync trail_activated from entries
         if symbol in self.entries:

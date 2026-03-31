@@ -1,59 +1,62 @@
 from AlgorithmImports import *
-import csv
-import io
+import json
+import http.client
+import ssl
 
 
-# Column mapping: SpotGamma CSV header → internal snake_case key
-# Numeric fields parsed as float, string fields stored as-is (lowercased)
-_NUMERIC_COLS = {
-    "Price": "price",
-    "Call Wall": "call_wall",
-    "Put Wall": "put_wall",
-    "Hedge Wall": "hedge_wall",
-    "Key Gamma Strike": "key_gamma_strike",
-    "Key Delta Strike": "key_delta_strike",
-    "CW Dist %": "cw_dist_pct",
-    "PW Dist %": "pw_dist_pct",
-    "HW Dist %": "hw_dist_pct",
-    "Options Impact": "options_impact",
-    "Impl Move $": "impl_move_dollar",
-    "Impl Move %": "impl_move_pct",
-    "Est Move High": "est_move_high",
-    "Est Move Low": "est_move_low",
-    "5D Move %": "five_day_move_pct",
-    "Monthly Move %": "monthly_move_pct",
-    "IV Rank": "iv_rank",
-    "IV Premium": "iv_premium",
-    "Net Gamma": "net_gamma",
-    "Gamma Tilt": "gamma_tilt",
+# Supabase column mapping: supabase snake_case → internal key
+_SB_NUMERIC_COLS = {
+    "current_price": "price",
+    "call_wall": "call_wall",
+    "put_wall": "put_wall",
+    "hedge_wall": "hedge_wall",
+    "key_gamma_strike": "key_gamma_strike",
+    "key_delta_strike": "key_delta_strike",
+    "call_wall_pct": "cw_dist_pct",
+    "put_wall_pct": "pw_dist_pct",
+    "hedge_wall_pct": "hw_dist_pct",
+    "options_impact": "options_impact",
+    "options_implied_move": "impl_move_dollar",
+    "implied_move_pct": "impl_move_pct",
+    "est_move_high": "est_move_high",
+    "est_move_low": "est_move_low",
+    "implied_move_5d_pct": "five_day_move_pct",
+    "est_move_monthly_pct": "monthly_move_pct",
+    "iv_rank": "iv_rank",
+    "iv_premium": "iv_premium",
+    "net_gamma": "net_gamma",
+    "gamma_tilt": "gamma_tilt",
 }
 
-_STRING_COLS = {
-    "Symbol": "symbol",
-    "Date": "date",
-    "Gamma Regime": "gamma_regime",
-    "Impact Tier": "impact_tier",
-    "IV Rank Tier": "iv_rank_tier",
-    "Inst Conviction": "inst_conviction",
-    "DPI Trend": "dpi_trend",
-    "Skew Signal": "skew_signal",
-    "OPEX Proximity": "opex_proximity",
+_SB_STRING_COLS = {
+    "symbol": "symbol",
+    "import_date": "date",
+    "gamma_regime": "gamma_regime",
+    "options_impact_tier": "impact_tier",
+    "iv_rank_tier": "iv_rank_tier",
+    "institutional_conviction": "inst_conviction",
+    "dpi_trend": "dpi_trend",
+    "skew_signal": "skew_signal",
+    "opex_proximity": "opex_proximity",
 }
 
-def _parse_row(row):
-    """Parse a single CSV row dict into internal format."""
+_SELECT_COLS = ",".join(list(_SB_NUMERIC_COLS.keys()) + list(_SB_STRING_COLS.keys()))
+
+
+def _parse_supabase_row(row):
+    """Parse a single Supabase JSON row dict into internal format."""
     rec = {}
-    for csv_col, key in _NUMERIC_COLS.items():
-        raw = row.get(csv_col, "")
-        if raw is None or str(raw).strip() == "":
+    for sb_col, key in _SB_NUMERIC_COLS.items():
+        raw = row.get(sb_col)
+        if raw is None:
             rec[key] = None
         else:
             try:
                 rec[key] = float(raw)
             except (ValueError, TypeError):
                 rec[key] = None
-    for csv_col, key in _STRING_COLS.items():
-        raw = row.get(csv_col, "")
+    for sb_col, key in _SB_STRING_COLS.items():
+        raw = row.get(sb_col)
         rec[key] = str(raw).strip().lower() if raw else ""
     return rec
 
@@ -68,49 +71,70 @@ class SpotGammaManager:
         self.sg_history = {}
         self.loaded_date = None
 
+    def _supabase_fetch(self, extra_params=""):
+        """Fetch rows from Supabase REST API using http.client (QC download blocks non-whitelisted domains)."""
+        host = self.config.SG_SUPABASE_URL.replace("https://", "")
+        key = self.config.SG_SUPABASE_KEY
+        table = self.config.SG_SUPABASE_TABLE
+        hdrs = {"apikey": key, "Authorization": f"Bearer {key}", "Accept": "application/json"}
+        page_size = 1000
+        offset = 0
+        all_rows = []
+        while True:
+            path = (f"/rest/v1/{table}?select={_SELECT_COLS}"
+                    f"&order=import_date.asc,symbol.asc"
+                    f"&offset={offset}&limit={page_size}{extra_params}")
+            try:
+                ctx = ssl.create_default_context()
+                conn = http.client.HTTPSConnection(host, timeout=30, context=ctx)
+                conn.request("GET", path, headers=hdrs)
+                resp = conn.getresponse()
+                raw = resp.read().decode("utf-8")
+                conn.close()
+            except Exception as e:
+                self.algo._log(f"[SG HTTP ERROR] {e}")
+                break
+            if not raw or raw.strip() in ("", "[]"):
+                break
+            rows = json.loads(raw)
+            if not rows:
+                break
+            all_rows.extend(rows)
+            if len(rows) < page_size:
+                break
+            offset += page_size
+        return all_rows
+
     def load_history(self):
-        """Load historical SpotGamma data from the History tab (one-time at init for backtesting)."""
-        gid = self.config.SG_HISTORY_GID
-        if not gid:
-            self.algo._log("[SG] No history GID configured — skipping history load")
-            return
-        url = f"{self.config.SG_SHEET_BASE_URL}?gid={gid}&single=true&output=csv"
+        """Load historical SpotGamma data from Supabase (one-time at init)."""
         try:
-            raw = self.algo.download(url)
-            if not raw or len(raw.strip()) == 0:
-                self.algo._log("[SG] History tab returned empty data")
-                return
-            reader = csv.DictReader(io.StringIO(raw))
+            rows = self._supabase_fetch()
             count = 0
-            for row in reader:
-                rec = _parse_row(row)
+            for row in rows:
+                rec = _parse_supabase_row(row)
                 sym = rec.get("symbol", "").upper()
                 date_str = rec.get("date", "").strip()
                 if sym and date_str:
                     self.sg_history[(sym, date_str)] = rec
                     count += 1
-            self.algo._log(f"[SG] Loaded {count} historical rows for {len(set(k[1] for k in self.sg_history))} dates")
+            dates = len(set(k[1] for k in self.sg_history)) if self.sg_history else 0
+            self.algo._log(f"[SG] Supabase: loaded {count} rows for {dates} dates")
         except Exception as e:
-            self.algo._log(f"[SG HISTORY ERROR] {str(e)}")
+            self.algo._log(f"[SG ERROR] History load failed: {str(e)}")
 
     def load_current_day(self):
-        """Fetch today's SpotGamma data from the current-day tab."""
+        """Fetch today's SpotGamma data from Supabase."""
         if not self.algo._is_trading_day():
             return
         today_str = self.algo.time.strftime("%Y-%m-%d")
         if self.loaded_date == today_str:
-            return  # Already loaded today
-        url = f"{self.config.SG_SHEET_BASE_URL}?gid={self.config.SG_CURRENT_GID}&single=true&output=csv"
+            return
         try:
-            raw = self.algo.download(url)
-            if not raw or len(raw.strip()) == 0:
-                self.algo._log("[SG] Current-day tab returned empty data")
-                return
-            reader = csv.DictReader(io.StringIO(raw))
+            rows = self._supabase_fetch(f"&import_date=eq.{today_str}")
             self.sg_data.clear()
             count = 0
-            for row in reader:
-                rec = _parse_row(row)
+            for row in rows:
+                rec = _parse_supabase_row(row)
                 sym = rec.get("symbol", "").upper()
                 if sym:
                     self.sg_data[sym] = rec
@@ -118,21 +142,19 @@ class SpotGammaManager:
             self.loaded_date = today_str
             self.algo.debug(f"[SG] Loaded {count} symbols for {today_str}")
         except Exception as e:
-            self.algo._log(f"[SG LOAD ERROR] {str(e)}")
+            self.algo._log(f"[SG ERROR] Current day load failed: {str(e)}")
 
     def get(self, symbol):
         """Get SpotGamma data for a symbol. Checks current-day first, then history.
         For history, looks back up to 10 calendar days if no exact date match."""
         sym = str(symbol).upper()
-        # Remove any QC suffix (e.g. "AAPL 2T" → "AAPL")
         if " " in sym:
             sym = sym.split(" ")[0]
         if sym in self.sg_data:
             return self.sg_data[sym]
-        # Fallback to history for backtesting — look back up to 10 days
         from datetime import timedelta
         today = self.algo.time.date()
-        for offset in range(11):  # 0 = today, 1 = yesterday, ... 10
+        for offset in range(11):
             check_date = today - timedelta(days=offset)
             date_str = check_date.strftime("%Y-%m-%d")
             rec = self.sg_history.get((sym, date_str))

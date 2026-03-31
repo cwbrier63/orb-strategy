@@ -24,6 +24,7 @@ class SignalEngine:
             "ATR_ZERO": 0,
             "TIME_CUTOFF": 0,
             "EMA_ALIGN": 0,
+            "EMA_STRETCH": 0,
             "HIGHER_CLOSE": 0,
             "HIGHER_OPEN": 0,
             "VOLUME_RISING": 0,
@@ -99,6 +100,17 @@ class SignalEngine:
         if prev is None:
             return True
         return bar.volume > prev.volume
+
+    def _eval_ema_stretch(self, symbol, is_long):
+        """Reject if EMA9/EMA20 spread is too extended (chasing exhausted momentum)."""
+        ema9 = self.indicators.get_ema_fast(symbol)
+        ema20 = self.indicators.get_ema_mid(symbol)
+        atr = self.indicators.get_atr(symbol)
+        if atr <= 0:
+            return True
+        stretch = (ema9 - ema20) / atr if is_long else (ema20 - ema9) / atr
+        max_s = self.config.LONG_MAX_EMA_STRETCH if is_long else self.config.SHORT_MAX_EMA_STRETCH
+        return stretch <= max_s
 
     def _eval_wick(self, bar, is_long):
         body = abs(bar.close - bar.open)
@@ -283,6 +295,56 @@ class SignalEngine:
                 self._log_reject(symbol, "LONG", "WEAK_BREAKOUT", bar)
                 return False
 
+        # Minimum ORB range filter — tiny ranges lack conviction
+        orb_range = self.orb.get_range(symbol)
+        min_orb = getattr(self.config, 'MIN_ORB_RANGE', 0)
+        if min_orb > 0 and orb_range is not None and orb_range < min_orb:
+            self._log_reject(symbol, "LONG", "SMALL_ORB_RANGE", bar)
+            return False
+
+        # ORB range / ATR ratio — ML #1 predictor
+        atr = self.indicators.get_atr(symbol)
+        min_ratio = getattr(self.config, 'MIN_ORB_ATR_RATIO', 0)
+        if min_ratio > 0 and atr > 0 and orb_range is not None:
+            if orb_range / atr < min_ratio:
+                self._log_reject(symbol, "LONG", "LOW_ORB_ATR_RATIO", bar)
+                return False
+
+        # Entry quality: price range and bar volume
+        if bar.close < getattr(self.config, 'MIN_ENTRY_PRICE', 0):
+            self._log_reject(symbol, "LONG", "PRICE_LOW", bar)
+            return False
+        if bar.close > getattr(self.config, 'MAX_ENTRY_PRICE', 9999):
+            self._log_reject(symbol, "LONG", "PRICE_HIGH", bar)
+            return False
+        if bar.volume < getattr(self.config, 'MIN_ENTRY_BAR_VOLUME', 0):
+            self._log_reject(symbol, "LONG", "LOW_BAR_VOLUME", bar)
+            return False
+
+        # RVOL cap for longs — crowded entries underperform
+        max_rvol = getattr(self.config, 'LONG_MAX_RVOL', 0)
+        if max_rvol > 0:
+            try:
+                from datetime import timedelta
+                ct = self.algo.time.time()
+                h = self.algo.history(symbol, timedelta(days=21), Resolution.MINUTE)
+                if not h.empty:
+                    h = h[h.index.get_level_values(1).time == ct]
+                    if len(h) >= 3:
+                        avg_vol = h["volume"].mean()
+                        if avg_vol > 0 and bar.volume / avg_vol > max_rvol:
+                            self._log_reject(symbol, "LONG", "HIGH_RVOL", bar)
+                            return False
+            except: pass
+
+        # Entry bar range / ATR — reject weak breakout bars (churning, not trending)
+        min_bar_atr = getattr(self.config, 'LONG_MIN_BAR_ATR_RATIO', 0)
+        if min_bar_atr > 0 and atr > 0:
+            bar_range = bar.high - bar.low
+            if bar_range / atr < min_bar_atr:
+                self._log_reject(symbol, "LONG", "WEAK_BAR", bar)
+                return False
+
         # This is a breakout candidate — count it and log rejections from here
         self.breakout_candidates += 1
 
@@ -309,6 +371,10 @@ class SignalEngine:
         # Filter 1: EMA alignment
         if self.config.LONG_REQUIRE_EMA_ALIGN and not self._eval_ema_align(symbol, is_long=True):
             self._log_reject(symbol, "LONG", "EMA_ALIGN", bar)
+            return False
+
+        if not self._eval_ema_stretch(symbol, is_long=True):
+            self._log_reject(symbol, "LONG", "EMA_STRETCH", bar)
             return False
 
         # Filter 2: Higher close
@@ -376,6 +442,32 @@ class SignalEngine:
                 self._log_reject(symbol, "SHORT", "WEAK_BREAKOUT", bar)
                 return False
 
+        # Minimum ORB range filter — tiny ranges lack conviction
+        orb_range = self.orb.get_range(symbol)
+        min_orb = getattr(self.config, 'MIN_ORB_RANGE', 0)
+        if min_orb > 0 and orb_range is not None and orb_range < min_orb:
+            self._log_reject(symbol, "SHORT", "SMALL_ORB_RANGE", bar)
+            return False
+
+        # ORB range / ATR ratio — ML #1 predictor
+        atr = self.indicators.get_atr(symbol)
+        min_ratio = getattr(self.config, 'MIN_ORB_ATR_RATIO', 0)
+        if min_ratio > 0 and atr > 0 and orb_range is not None:
+            if orb_range / atr < min_ratio:
+                self._log_reject(symbol, "SHORT", "LOW_ORB_ATR_RATIO", bar)
+                return False
+
+        # Entry quality: price range and bar volume
+        if bar.close < getattr(self.config, 'MIN_ENTRY_PRICE', 0):
+            self._log_reject(symbol, "SHORT", "PRICE_LOW", bar)
+            return False
+        if bar.close > getattr(self.config, 'MAX_ENTRY_PRICE', 9999):
+            self._log_reject(symbol, "SHORT", "PRICE_HIGH", bar)
+            return False
+        if bar.volume < getattr(self.config, 'MIN_ENTRY_BAR_VOLUME', 0):
+            self._log_reject(symbol, "SHORT", "LOW_BAR_VOLUME", bar)
+            return False
+
         # This is a breakout candidate — count it and log rejections from here
         self.breakout_candidates += 1
 
@@ -402,6 +494,10 @@ class SignalEngine:
         # Filter 1: EMA alignment
         if self.config.SHORT_REQUIRE_EMA_ALIGN and not self._eval_ema_align(symbol, is_long=False):
             self._log_reject(symbol, "SHORT", "EMA_ALIGN", bar)
+            return False
+
+        if not self._eval_ema_stretch(symbol, is_long=False):
+            self._log_reject(symbol, "SHORT", "EMA_STRETCH", bar)
             return False
 
         # Filter 2: Lower close

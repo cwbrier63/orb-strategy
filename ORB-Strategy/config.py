@@ -61,6 +61,20 @@ class OrbConfig:
     # Minimum breakout strength — reject if close is < X% beyond ORB level
     MIN_BREAKOUT_PCT = 0.001       # 0.1% minimum move beyond ORB level
 
+    # Minimum ORB range — reject if ORB range < threshold (tiny ranges lack conviction)
+    MIN_ORB_RANGE = 0.70           # Skip entries where ORB high-low < $0.70 (optimized: 0.70 best PnL/PF balance)
+    MIN_ORB_ATR_RATIO = 4.5        # testing: cuts 22% of trades (56.6% WR) to keep 64.5% WR trades
+
+    # Stall exit — tested bar5 (-$714) and bar15 (-$145). Both hurt net. Trail+hard stop sufficient.
+    USE_STALL_EXIT = False
+    STALL_EXIT_BARS = 15
+    STALL_EXIT_ATR_THRESHOLD = 0.10
+
+    # Entry quality filters — evidence-based from wide-open scanner analysis
+    MIN_ENTRY_PRICE = 50.0         # ML validated: $50-$135 is the profitable zone
+    MAX_ENTRY_PRICE = 135.0        # tested $10-$250: -$2,472 QC net, 14% DD — reverted
+    MIN_ENTRY_BAR_VOLUME = 60_000  # skip if breakout bar volume < 60K (low conviction)
+
     # Take profit master toggle
     USE_TAKE_PROFIT = False         # True = exit partial shares at R levels; False = trail only
 
@@ -68,8 +82,8 @@ class OrbConfig:
     EMA_CROSS_EXIT = False          # Exit when EMA9 crosses EMA20 against position
 
     # VWAP recross exit
-    USE_VWAP_RECROSS_EXIT = True    # Exit when price touches/crosses VWAP against position
-    VWAP_RECROSS_MIN_BARS = 1       # Consecutive bars price must stay wrong side of VWAP to trigger exit
+    USE_VWAP_RECROSS_EXIT = True    # Keeps losers from bleeding to hard stop — saves ~$69 vs OFF
+    VWAP_RECROSS_MIN_BARS = 3       # Consecutive bars price must stay wrong side of VWAP to trigger exit
 
     # Direction override
     FORCE_DIRECTION = 0             # 1 = force LONG, -1 = force SHORT, 0 = normal gap tagging
@@ -94,8 +108,8 @@ class OrbConfig:
     # Per-symbol daily limits (how many times one symbol can re-enter per day)
     MAX_DAILY_LONGS = 1             # max long entries per symbol per day
     MAX_DAILY_SHORTS = 1            # max short entries per symbol per day
-    MAX_DAILY_LOSSES_LONG = 1       # max long losses per symbol per day
-    MAX_DAILY_LOSSES_SHORT = 1      # max short losses per symbol per day
+    MAX_DAILY_LOSSES_LONG = 1       # tested 2: identical results, not binding
+    MAX_DAILY_LOSSES_SHORT = 1      # tested 2: identical results, not binding
 
     # Global daily limits (total entries across all symbols per day)
     MAX_DAILY_TOTAL_LONGS = 3       # symmetric with shorts — regime sizing handles risk
@@ -108,24 +122,28 @@ class OrbConfig:
     LONG_REQUIRE_VWAP = True            # zero effect (all longs already > VWAP) — keep as safety
     LONG_REQUIRE_HIGHER_CLOSE = True    # +synergy with HO+VR+MW (Sharpe 5.09 best combo)
     LONG_REQUIRE_HIGHER_OPEN = True     # +synergy with HC+VR+MW (Sharpe 5.09 best combo)
-    LONG_REQUIRE_VOLUME_RISING = False  # disabled — net-negative per short optimization, symmetric with shorts
+    LONG_REQUIRE_VOLUME_RISING = True   # ML: vol_rising=True → 63% WR +0.076R vs False → 53% WR -0.067R
     LONG_REQUIRE_MAX_WICK = True        # +synergy with HC+HO+VR (Sharpe 5.09, DD 1.2%)
     LONG_REQUIRE_ENTRY_WINDOW = False   # zero/negative effect for longs
+    LONG_MAX_EMA_STRETCH = 2.0         # max (ema9-ema20)/atr — rejects chasing extended breakouts
+    LONG_MAX_RVOL = 4.0                # optimal: 3.0 tested (-$234 QC), 4.0 is the sweet spot
+    LONG_MIN_BAR_ATR_RATIO = 1.0       # breakout bar range must be >= 1x ATR — rejects weak/churning bars
 
     # Short filters (H1 2025 attribution: higher_close, wick, volume all positive)
     SHORT_REQUIRE_EMA_ALIGN = False
     SHORT_REQUIRE_VWAP = True
     SHORT_REQUIRE_HIGHER_CLOSE = True   # +$243 for shorts, blocks 40 losers at 30% WR
     SHORT_REQUIRE_HIGHER_OPEN = True    # +edge for shorts per optimization
-    SHORT_REQUIRE_VOLUME_RISING = False # net-negative per optimization (0/64 profitable when ON)
+    SHORT_REQUIRE_VOLUME_RISING = False # tested run007: -$108 vs longs-only, shorts don't benefit
     SHORT_REQUIRE_MAX_WICK = True       # +$203 for shorts, blocks 68 losers at 39.7% WR
     SHORT_REQUIRE_ENTRY_WINDOW = False  # no effect
+    SHORT_MAX_EMA_STRETCH = 2.0        # max (ema20-ema9)/atr — rejects extended short entries
 
     # Late-entry cutoff — no new entries after this time (prevents stale backfilled ORB breakouts)
     LAST_ENTRY_TIME = time(10, 0)   # 10:00 AM ET — 15 min after ORB lock at 9:45
 
     # Spread filter (percentage of mid-price)
-    MAX_SPREAD_PCT = 0.40           # Widened from 0.24 — was blocking 80%+ of entries
+    MAX_SPREAD_PCT = 0.28           # ML rec: tight spread Q1+Q2 = +0.083 R vs wide Q3+Q4 = +0.003 R
 
     # Shared filter parameters
     MAX_WICK_PCT = 50               # Max wick as % of body size (50 = wick can't exceed body)
@@ -140,53 +158,53 @@ class OrbConfig:
     COARSE_MIN_DOLLAR_VOLUME = 10_000_000  # $10M daily dollar volume minimum
     COARSE_MAX_SYMBOLS = 200            # Start smaller to avoid timeout
 
-    # Auto universe — Trade-Ideas exact replication
+    # Auto universe — wide open for data collection, filter AFTER
     USE_AUTO_UNIVERSE = True
-    AUTO_MIN_PRICE = 10.0               # price >= $10 — eliminates penny-range stocks with outsized share counts
-    AUTO_MIN_ADV = 1_000_000            # avg daily volume >= 1M shares (Trade-Ideas match)
-    AUTO_MIN_TODAY_VOLUME = 100_000     # today's volume >= 100K
-    AUTO_MIN_ATR = 1.0                  # ATR14 >= $1
-    AUTO_GAP_PCT = 0.02                 # gap >= 2% — lower threshold produces weaker breakouts
-    AUTO_MAX_GAP_PCT = 0.10             # cap at 10% — exclude binary event runaway gaps
-    AUTO_MAX_SHORT_FLOAT = 0.20         # short float <= 20%
-    AUTO_MIN_FLOAT_SHARES = 1_000_000   # float >= 1M shares
-    AUTO_REQUIRE_EPS = True             # must have reported EPS != 0
-    AUTO_MIN_MARKET_CAP = 5_000_000     # market cap >= $5M
-    AUTO_NO_EARNINGS_TODAY = True       # exclude same-day earnings
-    AUTO_MAX_PRICE = 200.0              # price <= $200 — exclude mega-priced stocks
-    AUTO_MAX_SYMBOLS = 10               # cap universe per day
+    AUTO_MIN_PRICE = 10.0               # price >= $10
+    AUTO_MIN_ADV = 500_000              # avg daily volume >= 500K (was 1M)
+    AUTO_MIN_TODAY_VOLUME = 50_000      # today's volume >= 50K (was 100K)
+    AUTO_MIN_ATR = 0.30                 # ATR14 >= $0.30 (was $1)
+    AUTO_GAP_PCT = 0.01                 # gap >= 1% (was 2%)
+    AUTO_MAX_GAP_PCT = 0.15             # cap at 15% (was 10%)
+    AUTO_MAX_SHORT_FLOAT = 0.30         # short float <= 30% (was 20%)
+    AUTO_MIN_FLOAT_SHARES = 500_000     # float >= 500K (was 1M)
+    AUTO_REQUIRE_EPS = False            # disabled — was filtering too many growth stocks
+    AUTO_MIN_MARKET_CAP = 1_000_000     # market cap >= $1M (was $5M)
+    AUTO_NO_EARNINGS_TODAY = True       # keep — earnings days are binary events
+    AUTO_MAX_PRICE = 500.0              # price <= $500 (was $200)
+    AUTO_MAX_SYMBOLS = 40               # optimal: 20->30->40 each improved, 50 degraded
 
-    # Trend alignment filter — block trades against prevailing 20-day trend
-    AUTO_TREND_FILTER = True            # enable/disable
-    AUTO_TREND_RETURN_THRESHOLD = 0.05  # 5% — 20-day return must exceed this to count as trending
+    # Trend alignment filter
+    AUTO_TREND_FILTER = False           # DISABLED — let data show if trend matters
 
     # ── Auto Universe Scoring ─────────────────────────────────
-    AUTO_MIN_COMPOSITE_SCORE = 30       # reject candidates scoring below this
-    AUTO_SCORE_GAP_WEIGHT = 0.25        # gap quality weight (0-100 raw * weight)
-    AUTO_SCORE_ATR_WEIGHT = 0.20        # ATR quality weight
-    AUTO_SCORE_VOLUME_WEIGHT = 0.25     # volume/RVol weight
-    AUTO_SCORE_SG_WEIGHT = 0.15         # SpotGamma conviction alignment weight
-    AUTO_SCORE_LIQUIDITY_WEIGHT = 0.15  # ADV liquidity bonus weight
+    AUTO_MIN_COMPOSITE_SCORE = 10       # very low bar (was 30) — let more through
+    AUTO_SCORE_GAP_WEIGHT = 0.25
+    AUTO_SCORE_ATR_WEIGHT = 0.20
+    AUTO_SCORE_VOLUME_WEIGHT = 0.25
+    AUTO_SCORE_SG_WEIGHT = 0.15
+    AUTO_SCORE_LIQUIDITY_WEIGHT = 0.15
 
-    # Mini-backtester params
-    AUTO_MINI_BT_DAYS = 30              # days of 1-min history for mini-backtest
-    AUTO_MINI_BT_TIMEOUT = 5.0          # per-symbol timeout (seconds)
-    AUTO_MINI_BT_MIN_TRADES = 8         # reject if fewer than N historical trades (was 5, defaulting to T2)
-    AUTO_TIER1_MIN_WIN_RATE = 0.52
-    AUTO_TIER1_MIN_EXPECTANCY = 0.30
-    AUTO_TIER2_MIN_WIN_RATE = 0.42
-    AUTO_TIER2_MIN_EXPECTANCY = 0.15
-    AUTO_TIER3_MIN_WIN_RATE = 0.35
-    AUTO_TIER3_MIN_EXPECTANCY = 0.05
+    # Mini-backtester — DISABLED to stop rejecting everything
+    AUTO_MINI_BT_ENABLED = False        # skip mini-backtest entirely
+    AUTO_MINI_BT_DAYS = 30
+    AUTO_MINI_BT_TIMEOUT = 5.0
+    AUTO_MINI_BT_MIN_TRADES = 3
+    AUTO_TIER1_MIN_WIN_RATE = 0.50
+    AUTO_TIER1_MIN_EXPECTANCY = 0.20
+    AUTO_TIER2_MIN_WIN_RATE = 0.40
+    AUTO_TIER2_MIN_EXPECTANCY = 0.10
+    AUTO_TIER3_MIN_WIN_RATE = 0.30
+    AUTO_TIER3_MIN_EXPECTANCY = 0.00
 
     # Gap sustainability check
-    AUTO_GAP_MIN_RETENTION = 0.40       # downgrade if gap retained < 40%
+    AUTO_GAP_MIN_RETENTION = 0.10       # very loose — only kill if gap nearly fully faded
 
-    # ── SpotGamma Options Data ─────────────────────────────────
+    # ── SpotGamma Options Data (Supabase) ─────────────────────────────────
     SG_ENABLED = True                   # Master toggle — data collection only, filters disabled
-    SG_SHEET_BASE_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQ99XE1umgCIwhmEHK4H925kQMJylsUXjG011AZt1vMKVZ2exZcLqMjnst60kz_Hu3BUYsWlxS6TOAx/pub"
-    SG_CURRENT_GID = "780844695"
-    SG_HISTORY_GID = "1508647299"        # sg_levels tab — historical SpotGamma data
+    SG_SUPABASE_URL = "https://jqjqacvexefnmgfofxgn.supabase.co"
+    SG_SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpxanFhY3ZleGVmbm1nZm9meGduIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjgwMTU4OTksImV4cCI6MjA4MzU5MTg5OX0.S0wvbwPlBnu4tQUhHw5A-d6TSeHLrCK6fOTUTxJLeqY"
+    SG_SUPABASE_TABLE = "sg_levels"
 
     # Filter 1: Gamma Regime — NEGATIVE gamma = chaotic/trending = 43% hard stop rate
     # Data: positive gamma had 13% hard stops, negative had 43%. Block/reduce on negative.
