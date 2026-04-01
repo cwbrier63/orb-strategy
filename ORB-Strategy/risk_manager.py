@@ -23,16 +23,16 @@ class RiskManager:
     # Tier-based sizing multipliers (applied on top of regime multiplier)
     TIER_MULTIPLIERS = {1: 1.0, 2: 0.75, 3: 0.50}
 
-    def calculate_shares(self, symbol, max_dd_pct, price, tier=None):
-        """
-        Replicates TTP spreadsheet formula.
-        max_dd_pct: from variance backtest (e.g. -0.08 for -8% max drawdown)
-        tier: variance tier (1/2/3) — scales regime multiplier down for lower tiers
-        """
+    def calculate_shares(self, symbol, max_dd_pct, price, tier=None, is_long=True):
+        """TTP sizing with directional regime tilt."""
         regime = self.config.REGIME_CURRENT
+        if self.config.REGIME_AUTO_DETECT:
+            dir_mult = self.config.REGIME_LONG_MULT if is_long else self.config.REGIME_SHORT_MULT
+        else:
+            dir_mult = 1.0
         if tier is not None:
             regime *= self.TIER_MULTIPLIERS.get(tier, 1.0)
-        adj_risk = self.config.BASE_DAILY_RISK * regime
+        adj_risk = self.config.BASE_DAILY_RISK * regime * dir_mult
         max_position_dollars = adj_risk / abs(max_dd_pct)
         shares = math.floor(max_position_dollars / price)
         return max(shares, 0)

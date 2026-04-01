@@ -30,6 +30,8 @@ def apply_parameters(algo):
 
     # ── Regime ──
     _float("regime_current", "REGIME_CURRENT")
+    _float("regime_min_direction_mult", "REGIME_MIN_DIRECTION_MULT")
+    _bool("regime_auto_detect", "REGIME_AUTO_DETECT")
 
     # ── Long direction parameters ──
     p = algo.get_parameter("long_orb_minutes")

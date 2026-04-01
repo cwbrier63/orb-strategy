@@ -13,7 +13,16 @@ class OrbConfig:
     REGIME_UPTREND_PRESSURE = 0.50
     REGIME_DOWNTREND = 0.50
     REGIME_EXTREME_RISK_OFF = 0.25
-    REGIME_CURRENT = 0.50           # UPDATE THIS DAILY based on Briefings.com
+    REGIME_CURRENT = 0.50           # Base regime scalar (manual fallback)
+
+    # Automated Regime Detection — SPY overnight proxy
+    REGIME_AUTO_DETECT = False           # Tested 3 variants: no improvement over static 0.50. Infrastructure ready for live.
+    REGIME_USE_FUTURES = False          # False=SPY proxy (backtest), True=ES futures (live)
+    REGIME_LONG_MULT = 1.0             # Set by RegimeDetector at 9:12 AM
+    REGIME_SHORT_MULT = 1.0            # Set by RegimeDetector at 9:12 AM
+    REGIME_MIN_DIRECTION_MULT = 0.20   # Hedge floor — neither direction goes to zero
+    REGIME_LABEL = "NEUTRAL"
+    REGIME_OVERNIGHT_RET = 0.0
 
     # ORB — separate per direction
     ORB_OPEN_TIME = time(9, 30)     # ET

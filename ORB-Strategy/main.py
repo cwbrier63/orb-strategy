@@ -11,6 +11,7 @@ from signalstack_bridge import SignalStackBridge
 from spotgamma import SpotGammaManager
 from params import apply_parameters
 from universe_scorer import UniverseScorer
+from regime_detector import RegimeDetector
 
 
 class OrbAlgorithm(QCAlgorithm):
@@ -35,15 +36,15 @@ class OrbAlgorithm(QCAlgorithm):
         self.risk_mgr = RiskManager(self, self.config)
         self.bridge = SignalStackBridge(self, self.config)
         self.scorer = UniverseScorer(self, self.config)
+        self.regime_detector = RegimeDetector(self, self.config)
+        if self.config.REGIME_AUTO_DETECT:
+            self.regime_detector.initialize()
 
-        # Universe — loaded from auto scanner, Google Sheets CSV, or fallback
+        # Universe
         self.symbols = []
         self.max_dd = {}
-        # symbol_meta: {symbol: {"direction": "LONG"/"SHORT", "tier": 1/2/3, "max_dd": -0.08}}
         self.symbol_meta = {}
-        # Auto universe tracking: {symbol: {"direction": .., "gap_pct": .., "atr": ..}}
         self.auto_universe_candidates = {}
-        # Watchlist symbols for gap scanner scanning pool
         self.watchlist_symbols = []
 
         if self.config.USE_COARSE_UNIVERSE:
@@ -57,10 +58,8 @@ class OrbAlgorithm(QCAlgorithm):
             self._load_watchlist()
         if not self.config.USE_AUTO_UNIVERSE and not self.config.UNIVERSE_SHEET_URL:
             self._load_fallback_universe()
-        # Track whether sheet provided symbols today (set by load_universe_from_sheet)
         self._sheet_loaded_today = False
 
-        # Per-symbol direction tag: "LONG", "SHORT", or None (no gap)
         self.symbol_direction = {}
         self.prior_close = {}
         self.gap_qualified = {}
@@ -78,7 +77,6 @@ class OrbAlgorithm(QCAlgorithm):
         self.total_profit = 0.0
         self.total_loss_amt = 0.0
 
-        # Trade log — accumulates CSV rows, written to ObjectStore at EOA
         self.trade_log_rows = []
         self.trade_id = 0
 
@@ -110,6 +108,9 @@ class OrbAlgorithm(QCAlgorithm):
             self.time_rules.at(9, 10),
             self.daily_reset
         )
+
+        # Regime detection at 9:12 (after reset, before universe load)
+        self.schedule.on(self.date_rules.every_day(), self.time_rules.at(9, 12), self.compute_daily_regime)
 
         # Universe load: sheet at 9:15, auto scanner at 9:20 (fallback if sheet empty)
         if self.config.UNIVERSE_SHEET_URL:
@@ -641,6 +642,15 @@ class OrbAlgorithm(QCAlgorithm):
         except Exception as e:
             self.debug(f"[GAP_SUSTAIN ERROR] {e}")
 
+    def compute_daily_regime(self):
+        if not self.config.REGIME_AUTO_DETECT or not self._is_trading_day():
+            return
+        self.regime_detector.compute()
+        self.config.REGIME_LONG_MULT = self.regime_detector.long_mult
+        self.config.REGIME_SHORT_MULT = self.regime_detector.short_mult
+        self.config.REGIME_LABEL = self.regime_detector.regime_label
+        self.config.REGIME_OVERNIGHT_RET = self.regime_detector.overnight_return
+
     def eod_close(self):
         if not self._is_trading_day():
             return
@@ -1022,22 +1032,22 @@ class OrbAlgorithm(QCAlgorithm):
     def enter_long(self, symbol, bar, is_long=True):
         price = bar.close
         tier = self.symbol_meta.get(symbol, {}).get("tier")
-        shares = self.risk_mgr.calculate_shares(symbol, self.max_dd[symbol], price, tier=tier)
+        shares = self.risk_mgr.calculate_shares(symbol, self.max_dd[symbol], price, tier=tier, is_long=True)
         if shares <= 0:
             return
 
-        # SpotGamma gamma regime size reduction (negative gamma = chaotic, reduce size)
+        # SG gamma size reduction
         if (self.config.SG_ENABLED and self.config.SG_USE_GAMMA_REGIME
                 and self.config.SG_GAMMA_NEGATIVE_ACTION == "reduce" and self.sg_mgr):
             regime = self.sg_mgr.get_gamma_regime(symbol)
             if regime == "negative":
                 import math
                 shares = max(1, math.floor(shares * self.config.SG_GAMMA_NEGATIVE_SIZE_MULT))
-                self._log(f"[SG SIZE REDUCE] {symbol} LONG negative gamma → shares={shares}")
+                self._log(f"[SG] {symbol} L neg gamma s={shares}")
 
-        # Capital allocation guard
+        # Alloc guard
         if not self.risk_mgr.check_allocation(shares, price):
-            self._log(f"[ALLOC BLOCKED] {symbol} — ${shares * price:.0f} would exceed limit")
+            self._log(f"[ALLOC] {symbol} blocked ${shares*price:.0f}")
             return
 
         atr = self.indicators.get_atr(symbol)
@@ -1046,11 +1056,11 @@ class OrbAlgorithm(QCAlgorithm):
         sg_snapshot = self._build_sg_snapshot(symbol)
         filter_evals = self.signal_engine.evaluate_filters_at_entry(symbol, bar, is_long=True)
         universe_meta = self._build_universe_meta(symbol)
-        # SignalStack confirm-first gate — broker must accept before QC order
+        # SS confirm-first
         if self.config.SS_ENABLED and self.config.SS_CONFIRM_FIRST:
             success, ss_resp = self.bridge.send_and_confirm(str(symbol), "buy", shares)
             if not success:
-                self._log(f"[SS_BLOCKED] {symbol} LONG — broker rejected: {ss_resp}")
+                self._log(f"[SS] {symbol} LONG rejected: {ss_resp}")
                 return
 
         ticket = self.market_order(symbol, shares)
@@ -1062,27 +1072,27 @@ class OrbAlgorithm(QCAlgorithm):
         self.risk_mgr.add_allocation(shares, price)
         if not (self.config.SS_ENABLED and self.config.SS_CONFIRM_FIRST):
             self.bridge.send(str(symbol), "buy", shares)
-        self._log(f"[LONG] {symbol} shares={shares} price={price:.2f}")
+        self._log(f"[L] {symbol} s={shares} p={price:.2f}")
 
     def enter_short(self, symbol, bar, is_long=False):
         price = bar.close
         tier = self.symbol_meta.get(symbol, {}).get("tier")
-        shares = self.risk_mgr.calculate_shares(symbol, self.max_dd[symbol], price, tier=tier)
+        shares = self.risk_mgr.calculate_shares(symbol, self.max_dd[symbol], price, tier=tier, is_long=False)
         if shares <= 0:
             return
 
-        # SpotGamma gamma regime size reduction (negative gamma = chaotic, reduce size)
+        # SG gamma size reduction
         if (self.config.SG_ENABLED and self.config.SG_USE_GAMMA_REGIME
                 and self.config.SG_GAMMA_NEGATIVE_ACTION == "reduce" and self.sg_mgr):
             regime = self.sg_mgr.get_gamma_regime(symbol)
             if regime == "negative":
                 import math
                 shares = max(1, math.floor(shares * self.config.SG_GAMMA_NEGATIVE_SIZE_MULT))
-                self._log(f"[SG SIZE REDUCE] {symbol} SHORT negative gamma → shares={shares}")
+                self._log(f"[SG] {symbol} S neg gamma s={shares}")
 
-        # Capital allocation guard
+        # Alloc guard
         if not self.risk_mgr.check_allocation(shares, price):
-            self._log(f"[ALLOC BLOCKED] {symbol} — ${shares * price:.0f} would exceed limit")
+            self._log(f"[ALLOC] {symbol} blocked ${shares*price:.0f}")
             return
 
         atr = self.indicators.get_atr(symbol)
@@ -1091,11 +1101,11 @@ class OrbAlgorithm(QCAlgorithm):
         sg_snapshot = self._build_sg_snapshot(symbol)
         filter_evals = self.signal_engine.evaluate_filters_at_entry(symbol, bar, is_long=False)
         universe_meta = self._build_universe_meta(symbol)
-        # SignalStack confirm-first gate — broker must accept before QC order
+        # SS confirm-first
         if self.config.SS_ENABLED and self.config.SS_CONFIRM_FIRST:
             success, ss_resp = self.bridge.send_and_confirm(str(symbol), "sell_short", shares)
             if not success:
-                self._log(f"[SS_BLOCKED] {symbol} SHORT — broker rejected: {ss_resp}")
+                self._log(f"[SS] {symbol} SHORT rejected: {ss_resp}")
                 return
 
         ticket = self.market_order(symbol, -shares)
@@ -1107,7 +1117,7 @@ class OrbAlgorithm(QCAlgorithm):
         self.risk_mgr.add_allocation(shares, price)
         if not (self.config.SS_ENABLED and self.config.SS_CONFIRM_FIRST):
             self.bridge.send(str(symbol), "sell_short", shares)
-        self._log(f"[SHORT] {symbol} shares={shares} price={price:.2f}")
+        self._log(f"[S] {symbol} s={shares} p={price:.2f}")
 
     def partial_exit(self, symbol, price, tp_shares, reason, tp_price):
         """Execute a partial take-profit exit — sell portion, keep position open."""
@@ -1126,7 +1136,7 @@ class OrbAlgorithm(QCAlgorithm):
 
         action = "sell" if is_long else "buy_to_cover"
 
-        # SignalStack confirm-first for partial exits
+        # SS confirm partial
         if self.config.SS_ENABLED and self.config.SS_CONFIRM_FIRST:
             success, ss_resp = self.bridge.send_and_confirm(str(symbol), action, shares_to_exit)
             if not success:

@@ -22,6 +22,7 @@ TRADE_LOG_COLUMNS = [
     'p_use_take_profit', 'p_r_tp1', 'p_r_tp2', 'p_r_tp3',
     # Group 4: Config Parameters (shared)
     'p_account_size', 'p_base_daily_risk', 'p_max_total_allocated', 'p_regime_current',
+    'p_regime_label', 'p_regime_long_mult', 'p_regime_short_mult', 'p_regime_overnight',
     'p_gap_filter_pct', 'p_ema_fast', 'p_ema_mid', 'p_ema_slow', 'p_atr_period',
     'p_max_daily_longs', 'p_max_daily_shorts',
     'p_max_daily_losses_long', 'p_max_daily_losses_short', 'p_force_direction',
@@ -546,6 +547,10 @@ class TradeManager:
             'p_base_daily_risk': config.BASE_DAILY_RISK,
             'p_max_total_allocated': config.MAX_TOTAL_ALLOCATED,
             'p_regime_current': config.REGIME_CURRENT,
+            'p_regime_label': config.REGIME_LABEL,
+            'p_regime_long_mult': config.REGIME_LONG_MULT,
+            'p_regime_short_mult': config.REGIME_SHORT_MULT,
+            'p_regime_overnight': round(config.REGIME_OVERNIGHT_RET, 5),
             'p_gap_filter_pct': config.GAP_FILTER_PCT,
             'p_ema_fast': config.EMA_FAST,
             'p_ema_mid': config.EMA_MID,
