@@ -12,6 +12,7 @@ from spotgamma import SpotGammaManager
 from params import apply_parameters
 from universe_scorer import UniverseScorer
 from regime_detector import RegimeDetector
+from universe_loader import SupabaseUniverseLoader
 
 
 class OrbAlgorithm(QCAlgorithm):
@@ -39,6 +40,9 @@ class OrbAlgorithm(QCAlgorithm):
         self.regime_detector = RegimeDetector(self, self.config)
         if self.config.REGIME_AUTO_DETECT:
             self.regime_detector.initialize()
+        self._scanner_loader = SupabaseUniverseLoader(self, self.config)
+        if self.config.USE_SCANNER_UNIVERSE:
+            self._scanner_loader.subscribe_all()
 
         # Universe
         self.symbols = []
@@ -64,14 +68,13 @@ class OrbAlgorithm(QCAlgorithm):
         self.prior_close = {}
         self.gap_qualified = {}
 
-        # Daily P&L tracking
+        # P&L
         self.day_start_equity = self.config.ACCOUNT_SIZE
         self.daily_halt = False
         self.daily_warning_fired = False
         self.max_drawdown_dollars = 0
         self.worst_daily_loss = 0
 
-        # Trade tracking for optimization scoring
         self.total_wins = 0
         self.total_losses = 0
         self.total_profit = 0.0
@@ -80,22 +83,17 @@ class OrbAlgorithm(QCAlgorithm):
         self.trade_log_rows = []
         self.trade_id = 0
 
-        # Spread/allocation rejection dedup (one log per symbol per day)
         self._spread_rejected_today = set()
         self._alloc_rejected_today = set()
 
-        # Order fill tracking — correct entry prices using actual fills
         self._entry_order_ids = {}    # order_id -> symbol
         self._actual_entry_fills = {} # symbol -> fill_price
 
-        # Exit fill tracking — defer PnL calc until actual fill price arrives
         self._exit_order_ids = {}     # order_id -> symbol
         self._pending_exits = {}      # symbol -> {entry_price, is_long, quantity, reason}
 
-        # Daily rejection buffer for ObjectStore CSV
         self._all_reject_rows = []
 
-        # (log buffer initialized at top of initialize())
 
         # Late-start catch-up: if bot starts after scheduled events, run them on first bar
         self._catchup_done = False
@@ -112,13 +110,11 @@ class OrbAlgorithm(QCAlgorithm):
         # Regime detection at 9:12 (after reset, before universe load)
         self.schedule.on(self.date_rules.every_day(), self.time_rules.at(9, 12), self.compute_daily_regime)
 
-        # Universe load: sheet at 9:15, auto scanner at 9:20 (fallback if sheet empty)
-        if self.config.UNIVERSE_SHEET_URL:
-            self.schedule.on(
-                self.date_rules.every_day(),
-                self.time_rules.at(9, 15),
-                self.load_universe_from_sheet
-            )
+        # Universe load: scanner DB at 9:15, sheet fallback, auto gap scanner at 9:20
+        if getattr(self.config, 'USE_SCANNER_UNIVERSE', False):
+            self.schedule.on(self.date_rules.every_day(), self.time_rules.at(9, 15), self._load_from_scanner)
+        elif self.config.UNIVERSE_SHEET_URL:
+            self.schedule.on(self.date_rules.every_day(), self.time_rules.at(9, 15), self.load_universe_from_sheet)
 
         if self.config.USE_AUTO_UNIVERSE:
             self.schedule.on(
@@ -659,6 +655,10 @@ class OrbAlgorithm(QCAlgorithm):
                 price = self.securities[symbol].price
                 self.exit_position(symbol, price, "EOD")
         self._log("[EOD CLOSE] All positions flattened")
+
+    def _load_from_scanner(self):
+        if not self._is_trading_day(): return
+        self._scanner_loader.load(self.time.strftime("%Y-%m-%d"))
 
     def daily_log_flush(self):
         """Write logs to ObjectStore at EOD without stopping the bot."""

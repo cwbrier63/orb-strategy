@@ -80,8 +80,8 @@ class OrbConfig:
     STALL_EXIT_ATR_THRESHOLD = 0.10
 
     # Entry quality filters — evidence-based from wide-open scanner analysis
-    MIN_ENTRY_PRICE = 50.0         # ML validated: $50-$135 is the profitable zone
-    MAX_ENTRY_PRICE = 135.0        # tested $10-$250: -$2,472 QC net, 14% DD — reverted
+    MIN_ENTRY_PRICE = 50.0         # run015 optimal
+    MAX_ENTRY_PRICE = 135.0        # run015 optimal
     MIN_ENTRY_BAR_VOLUME = 60_000  # skip if breakout bar volume < 60K (low conviction)
 
     # Take profit master toggle
@@ -91,7 +91,7 @@ class OrbConfig:
     EMA_CROSS_EXIT = False          # Exit when EMA9 crosses EMA20 against position
 
     # VWAP recross exit
-    USE_VWAP_RECROSS_EXIT = True    # Keeps losers from bleeding to hard stop — saves ~$69 vs OFF
+    USE_VWAP_RECROSS_EXIT = False   # Testing: was +$69 on old filters, retesting with tight run015 filters
     VWAP_RECROSS_MIN_BARS = 3       # Consecutive bars price must stay wrong side of VWAP to trigger exit
 
     # Direction override
@@ -158,8 +158,9 @@ class OrbConfig:
     MAX_WICK_PCT = 50               # Max wick as % of body size (50 = wick can't exceed body)
     ENTRY_WINDOW_BARS = 1           # Must enter within N bars of breakout detection
 
-    # Universe source — published Google Sheets CSV URL (empty = use FORCE_DIRECTION fallback)
-    UNIVERSE_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRKo9MtuEQI5a7pAxYuhbNoPX0IGtVQk347mBTNLsRWVt9FajGXqy0JYKgznqSb_w/pub?gid=1095632619&single=true&output=csv"
+    # Universe source
+    USE_SCANNER_UNIVERSE = False    # Testing: compare vs auto scanner for same dates
+    UNIVERSE_SHEET_URL = ""  # Disabled — replaced by Supabase scanner or auto gap scanner
     WATCHLIST_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRKo9MtuEQI5a7pAxYuhbNoPX0IGtVQk347mBTNLsRWVt9FajGXqy0JYKgznqSb_w/pub?gid=897666895&single=true&output=csv"
 
     # Coarse universe — dynamic daily filtering from all US equities (replaces static watchlist)
