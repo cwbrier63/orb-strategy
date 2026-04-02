@@ -302,9 +302,9 @@ class SignalEngine:
             self._log_reject(symbol, "LONG", "SMALL_ORB_RANGE", bar)
             return False
 
-        # ORB range / ATR ratio — ML #1 predictor
+        # ORB range / ATR ratio — direction-specific
         atr = self.indicators.get_atr(symbol)
-        min_ratio = getattr(self.config, 'MIN_ORB_ATR_RATIO', 0)
+        min_ratio = getattr(self.config, 'LONG_MIN_ORB_ATR_RATIO', getattr(self.config, 'MIN_ORB_ATR_RATIO', 0))
         if min_ratio > 0 and atr > 0 and orb_range is not None:
             if orb_range / atr < min_ratio:
                 self._log_reject(symbol, "LONG", "LOW_ORB_ATR_RATIO", bar)
@@ -449,9 +449,9 @@ class SignalEngine:
             self._log_reject(symbol, "SHORT", "SMALL_ORB_RANGE", bar)
             return False
 
-        # ORB range / ATR ratio — ML #1 predictor
+        # ORB range / ATR ratio — direction-specific
         atr = self.indicators.get_atr(symbol)
-        min_ratio = getattr(self.config, 'MIN_ORB_ATR_RATIO', 0)
+        min_ratio = getattr(self.config, 'SHORT_MIN_ORB_ATR_RATIO', getattr(self.config, 'MIN_ORB_ATR_RATIO', 0))
         if min_ratio > 0 and atr > 0 and orb_range is not None:
             if orb_range / atr < min_ratio:
                 self._log_reject(symbol, "SHORT", "LOW_ORB_ATR_RATIO", bar)

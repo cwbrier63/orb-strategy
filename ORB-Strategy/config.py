@@ -72,7 +72,8 @@ class OrbConfig:
 
     # Minimum ORB range — reject if ORB range < threshold (tiny ranges lack conviction)
     MIN_ORB_RANGE = 0.70           # Skip entries where ORB high-low < $0.70 (optimized: 0.70 best PnL/PF balance)
-    MIN_ORB_ATR_RATIO = 4.5        # testing: cuts 22% of trades (56.6% WR) to keep 64.5% WR trades
+    LONG_MIN_ORB_ATR_RATIO = 4.5   # ML validated
+    SHORT_MIN_ORB_ATR_RATIO = 4.5  # Tested 3.0: -$227, reverted. 4.5 optimal for both directions.
 
     # Stall exit — tested bar5 (-$714) and bar15 (-$145). Both hurt net. Trail+hard stop sufficient.
     USE_STALL_EXIT = False
@@ -80,8 +81,8 @@ class OrbConfig:
     STALL_EXIT_ATR_THRESHOLD = 0.10
 
     # Entry quality filters — evidence-based from wide-open scanner analysis
-    MIN_ENTRY_PRICE = 50.0         # run015 optimal
-    MAX_ENTRY_PRICE = 135.0        # run015 optimal
+    MIN_ENTRY_PRICE = 50.0         # Production: $50-135 is the profitable zone
+    MAX_ENTRY_PRICE = 135.0        # Production: tested $10-250 was worse
     MIN_ENTRY_BAR_VOLUME = 60_000  # skip if breakout bar volume < 60K (low conviction)
 
     # Take profit master toggle
@@ -159,7 +160,7 @@ class OrbConfig:
     ENTRY_WINDOW_BARS = 1           # Must enter within N bars of breakout detection
 
     # Universe source
-    USE_SCANNER_UNIVERSE = False    # Testing: compare vs auto scanner for same dates
+    USE_SCANNER_UNIVERSE = False    # Scanner validated. Auto gap scanner for production until full backfill.
     UNIVERSE_SHEET_URL = ""  # Disabled — replaced by Supabase scanner or auto gap scanner
     WATCHLIST_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRKo9MtuEQI5a7pAxYuhbNoPX0IGtVQk347mBTNLsRWVt9FajGXqy0JYKgznqSb_w/pub?gid=897666895&single=true&output=csv"
 
