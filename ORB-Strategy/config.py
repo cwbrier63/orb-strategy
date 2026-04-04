@@ -160,7 +160,7 @@ class OrbConfig:
     ENTRY_WINDOW_BARS = 1           # Must enter within N bars of breakout detection
 
     # Universe source
-    USE_SCANNER_UNIVERSE = False    # Scanner validated. Auto gap scanner for production until full backfill.
+    USE_SCANNER_UNIVERSE = True     # Live paper: Supabase scanner universe at 9:15
     UNIVERSE_SHEET_URL = ""  # Disabled — replaced by Supabase scanner or auto gap scanner
     WATCHLIST_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vRKo9MtuEQI5a7pAxYuhbNoPX0IGtVQk347mBTNLsRWVt9FajGXqy0JYKgznqSb_w/pub?gid=897666895&single=true&output=csv"
 
@@ -245,7 +245,7 @@ class OrbConfig:
     SG_OPEX_BLOCK_DISTANT = False       # Block entries when opex_proximity = "distant"
 
     # Execution
-    SS_ENABLED = False             # Set True for paper/live — False for backtest
+    SS_ENABLED = False             # Paper trading: monitor only, no webhook orders yet
     SS_PAPER_URL = "https://app.signalstack.com/hook/w3rWj74GcoTYh8MF8FoCxR"
     SS_LIVE_URL = ""                # SignalStack live webhook URL
     SS_CONFIRM_FIRST = True         # Call SS synchronously, block QC order if broker rejects
