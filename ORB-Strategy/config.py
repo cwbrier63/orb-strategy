@@ -245,7 +245,7 @@ class OrbConfig:
     SG_OPEX_BLOCK_DISTANT = False       # Block entries when opex_proximity = "distant"
 
     # Execution
-    SS_ENABLED = False             # Paper trading: monitor only, no webhook orders yet
+    SS_ENABLED = True              # PAPER TRADING LIVE — webhooks active via SS_PAPER_URL
     SS_PAPER_URL = "https://app.signalstack.com/hook/w3rWj74GcoTYh8MF8FoCxR"
     SS_LIVE_URL = ""                # SignalStack live webhook URL
     SS_CONFIRM_FIRST = True         # Call SS synchronously, block QC order if broker rejects
