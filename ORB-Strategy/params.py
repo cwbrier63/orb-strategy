@@ -33,6 +33,17 @@ def apply_parameters(algo):
     _float("regime_min_direction_mult", "REGIME_MIN_DIRECTION_MULT")
     _bool("regime_auto_detect", "REGIME_AUTO_DETECT")
 
+    # ── Strategy mode ──
+    p = algo.get_parameter("strategy_mode")
+    if p is not None:
+        config.STRATEGY_MODE = str(p)
+
+    # ── ORF parameters ──
+    _float("orf_max_regime", "ORF_MAX_REGIME")
+    _float("orf_max_orb_range_atr", "ORF_MAX_ORB_RANGE_ATR")
+    _float("orf_hard_stop_atr_mult", "ORF_HARD_STOP_ATR_MULT")
+    _float("orf_min_entry_volume", "ORF_MIN_ENTRY_VOLUME")
+
     # ── Long direction parameters ──
     p = algo.get_parameter("long_orb_minutes")
     if p is not None:

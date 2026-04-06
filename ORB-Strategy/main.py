@@ -28,7 +28,6 @@ class OrbAlgorithm(QCAlgorithm):
         self._run_tag = self.time.strftime("%Y%m%d_%H%M%S")
         self.set_brokerage_model(BrokerageName.INTERACTIVE_BROKERS_BROKERAGE, AccountType.MARGIN)
 
-        # Modules
         self.orb = OrbCalculator(self, self.config)
         self.indicators = IndicatorManager(self, self.config)
         self.sg_mgr = SpotGammaManager(self, self.config) if self.config.SG_ENABLED else None
@@ -44,7 +43,6 @@ class OrbAlgorithm(QCAlgorithm):
         if self.config.USE_SCANNER_UNIVERSE:
             self._scanner_loader.subscribe_all()
 
-        # Universe
         self.symbols = []
         self.max_dd = {}
         self.symbol_meta = {}
@@ -95,22 +93,18 @@ class OrbAlgorithm(QCAlgorithm):
         self._all_reject_rows = []
 
 
-        # Late-start catch-up: if bot starts after scheduled events, run them on first bar
         self._catchup_done = False
         self._catchup_reset_done = False
         self._catchup_sg_done = False
 
-        # Daily reset FIRST, then universe load
         self.schedule.on(
             self.date_rules.every_day(),
             self.time_rules.at(9, 10),
             self.daily_reset
         )
 
-        # Regime detection at 9:12 (after reset, before universe load)
         self.schedule.on(self.date_rules.every_day(), self.time_rules.at(9, 12), self.compute_daily_regime)
 
-        # Universe load: scanner DB at 9:15, sheet fallback, auto gap scanner at 9:20
         if getattr(self.config, 'USE_SCANNER_UNIVERSE', False):
             self.schedule.on(self.date_rules.every_day(), self.time_rules.at(9, 15), self._load_from_scanner)
         elif self.config.UNIVERSE_SHEET_URL:
@@ -122,14 +116,12 @@ class OrbAlgorithm(QCAlgorithm):
                 self.time_rules.at(9, 20),
                 self.run_gap_scanner
             )
-            # Gap sustainability check — downgrade faded gaps after ORB window
             self.schedule.on(
                 self.date_rules.every_day(),
                 self.time_rules.at(9, 36),
                 self.check_gap_sustainability
             )
 
-        # SpotGamma data loading
         if self.sg_mgr:
             self.sg_mgr.load_history()
             self.schedule.on(
@@ -138,14 +130,12 @@ class OrbAlgorithm(QCAlgorithm):
                 self.sg_mgr.load_current_day
             )
 
-        # EOD close — flatten all positions at 3:55 PM ET
         self.schedule.on(
             self.date_rules.every_day(),
             self.time_rules.at(15, 55),
             self.eod_close
         )
 
-        # Daily log flush — write logs to ObjectStore so they're accessible without stopping the bot
         self.schedule.on(
             self.date_rules.every_day(),
             self.time_rules.at(15, 57),
@@ -221,7 +211,6 @@ class OrbAlgorithm(QCAlgorithm):
             self._log(f"[UNIVERSE] Sheet returned {len(rows)} rows, looking for {today_str}")
 
             for row in rows:
-                # Normalize date: handle both "2026-03-10" and "3/10/2026" formats
                 raw_date = row.get("Date", "").strip()
                 try:
                     from datetime import datetime as _dt
@@ -242,11 +231,9 @@ class OrbAlgorithm(QCAlgorithm):
                 if not ticker or direction not in ("LONG", "SHORT"):
                     continue
 
-                # Tier: use Final Tier if present, else Var Tier, else "T1"
                 tier_raw = (row.get("Final Tier") or row.get("Var Tier") or "T1").strip().upper().lstrip("T")
                 tier = int(tier_raw) if tier_raw.isdigit() else 1
 
-                # Max DD from sheet (e.g. "-6.60%") or tier default
                 tier_dd_map = {1: -0.08, 2: -0.06, 3: -0.04}
                 max_dd_str = row.get("Max DD %", "").strip().rstrip("%")
                 try:
@@ -259,7 +246,6 @@ class OrbAlgorithm(QCAlgorithm):
                     "tier": tier,
                     "max_dd": max_dd,
                     "source": "SHEET",
-                    # Sheet fields
                     "gap_pct_sheet": row.get("Gap %", "").strip(),
                     "catalyst": row.get("Catalyst", "").strip(),
                     "cat_quality": row.get("Cat Quality", "").strip(),
@@ -269,7 +255,6 @@ class OrbAlgorithm(QCAlgorithm):
                     "net_perf": row.get("Net Perf %", "").strip(),
                     "expectancy": row.get("Expectancy", "").strip(),
                     "notes": row.get("Notes", "").strip(),
-                    # Trade-Ideas fields
                     "ti_timestamp": row.get("TI Timestamp", "").strip(),
                     "ti_price": row.get("TI Price", "").strip(),
                     "ti_chg_dollar": row.get("TI Chg $", "").strip(),
@@ -289,7 +274,6 @@ class OrbAlgorithm(QCAlgorithm):
                 return
             self._sheet_loaded_today = True
 
-            # Remove stale symbols no longer in today's list
             new_symbol_objects = set()
             for ticker, meta in today_symbols.items():
                 symbol = self.add_equity(ticker, Resolution.MINUTE).symbol
@@ -301,12 +285,10 @@ class OrbAlgorithm(QCAlgorithm):
                 self.symbol_meta[symbol] = meta
                 self.debug(f"[UNIV] {ticker} {meta['direction']} T{meta['tier']}")
 
-            # Remove symbols from previous day that aren't in today's list
             stale = [s for s in self.symbols if s not in new_symbol_objects]
             for s in stale:
                 self.symbols.remove(s); self.max_dd.pop(s, None); self.symbol_meta.pop(s, None)
 
-            # Fetch prior close and tag direction for all loaded symbols
             for sym in list(new_symbol_objects):
                 hist = self.history(sym, 2, Resolution.DAILY)
                 if not hist.empty and len(hist) >= 1:
@@ -340,7 +322,6 @@ class OrbAlgorithm(QCAlgorithm):
         except Exception as e:
             self._log(f"[WATCHLIST ERROR] {str(e)} — using fallback")
 
-        # Fallback if sheet unavailable
         if not tickers:
             tickers = [
                 "NVO","COHR","B","WDC","CRDO","IAG","UEC","LITE","AXTI","SGML",
@@ -361,7 +342,6 @@ class OrbAlgorithm(QCAlgorithm):
             ]
             self._log(f"[WATCHLIST] Fallback loaded {len(tickers)} symbols")
 
-        # Deduplicate
         seen = set()
         unique_tickers = []
         for t in tickers:
@@ -369,7 +349,6 @@ class OrbAlgorithm(QCAlgorithm):
                 seen.add(t)
                 unique_tickers.append(t)
 
-        # Subscribe all at Minute + extended market hours for real pre-market data
         for ticker in unique_tickers:
             try:
                 sym = self.add_equity(
@@ -388,11 +367,9 @@ class OrbAlgorithm(QCAlgorithm):
         to compute true gaps vs yesterday's close.
         Skipped when Google Sheets provided symbols for today."""
         try:
-            # Skip weekends
             if not self._is_trading_day():
                 return
 
-            # Sheet-first priority: if curated list loaded, skip auto scanner
             if self._sheet_loaded_today:
                 self._log("[GAP_SCANNER] Sheet symbols — skip scan")
                 return
@@ -400,7 +377,6 @@ class OrbAlgorithm(QCAlgorithm):
             cfg = self.config
             date_str = self.time.strftime("%Y-%m-%d")
 
-            # Remove previous day's auto-selected trading symbols
             stale = [s for s in list(self.symbols) if s in self.auto_universe_candidates]
             for s in stale:
                 self.symbols.remove(s)
@@ -415,13 +391,11 @@ class OrbAlgorithm(QCAlgorithm):
                 self._log("[GAP_SCANNER] No symbols to scan")
                 return
 
-            # Get daily history for ATR/ADV calculations
             all_hist = self.history(scan_pool, 22, Resolution.DAILY)
             if all_hist.empty:
                 self._log("[GAP_SCANNER] No history")
                 return
 
-            # Build prev_close lookup from daily history
             prev_closes = {}
             try:
                 for sym in all_hist.index.get_level_values(0).unique():
@@ -432,7 +406,6 @@ class OrbAlgorithm(QCAlgorithm):
                 self._log("[GAP_SCANNER] Could not build prev_close lookup")
                 return
 
-            # Scan using REAL pre-market prices
             candidates = []
             diag = {"scanned": 0, "no_price": 0, "price_fail": 0, "gap_fail": 0,
                     "atr_fail": 0, "adv_fail": 0, "etf_skip": 0, "trend_fail": 0, "errors": 0}
@@ -441,7 +414,6 @@ class OrbAlgorithm(QCAlgorithm):
                 try:
                     diag["scanned"] += 1
 
-                    # Real pre-market price from Minute + extended hours subscription
                     pre_market_price = self.securities[sym].price
                     if pre_market_price <= 0:
                         diag["no_price"] += 1
@@ -452,19 +424,16 @@ class OrbAlgorithm(QCAlgorithm):
                         diag["no_price"] += 1
                         continue
 
-                    # Price filters
                     if pre_market_price < cfg.AUTO_MIN_PRICE or pre_market_price > cfg.AUTO_MAX_PRICE:
                         diag["price_fail"] += 1
                         continue
 
-                    # TRUE gap: pre-market price vs yesterday's close
                     gap_pct = (pre_market_price - prev_close) / prev_close
                     abs_gap = abs(gap_pct)
                     if abs_gap < cfg.AUTO_GAP_PCT or abs_gap > cfg.AUTO_MAX_GAP_PCT:
                         diag["gap_fail"] += 1
                         continue
 
-                    # ATR14 from daily history
                     hist = all_hist.loc[sym]
                     highs = hist["high"].values
                     lows = hist["low"].values
@@ -482,13 +451,11 @@ class OrbAlgorithm(QCAlgorithm):
                         diag["atr_fail"] += 1
                         continue
 
-                    # ADV (average daily volume over ~21 days)
                     adv = hist["volume"].mean()
                     if adv < cfg.AUTO_MIN_ADV:
                         diag["adv_fail"] += 1
                         continue
 
-                    # ETF filter — ETFs lack fundamental data (replaces Trade-Ideas EPS >= $0.01 filter)
                     if cfg.AUTO_REQUIRE_EPS:
                         try:
                             if not self.securities[sym].fundamentals.has_fundamental_data:
@@ -510,7 +477,6 @@ class OrbAlgorithm(QCAlgorithm):
                 self._log("[GAP_SCANNER] No candidates")
                 return
 
-            # Phase 1: Composite scoring — rank by multi-factor score
             scored = self.scorer.score_candidates(candidates, sg_mgr=self.sg_mgr)
             if not scored:
                 self._log("[GAP_SCANNER] No candidates passed composite scoring")
@@ -524,7 +490,6 @@ class OrbAlgorithm(QCAlgorithm):
             else:
                 for c in scored: c["tier"] = 3; c["max_dd"] = -0.06
 
-            # Trend filter on scored winners only (not all 200 candidates — avoids timeout)
             if cfg.AUTO_TREND_FILTER:
                 filtered = []
                 for c in scored:
@@ -545,7 +510,6 @@ class OrbAlgorithm(QCAlgorithm):
                     filtered.append(c)
                 scored = filtered
 
-            # Add winners to active trading list (already subscribed at Minute)
             for c in scored:
                 sym = c["symbol"]
                 if sym not in self.symbols:
@@ -581,7 +545,6 @@ class OrbAlgorithm(QCAlgorithm):
                     f"({c.get('detail', '')})"
                 )
 
-            # Audit trail to ObjectStore
             try:
                 rows = [
                     f"{date_str},{c['symbol'].value},{c['gap_pct'] * 100:.2f},"
@@ -594,7 +557,6 @@ class OrbAlgorithm(QCAlgorithm):
             except:
                 pass
 
-            # Append daily diagnostics to cumulative log
             try:
                 diag_key = "gap_scanner_diag.csv"
                 existing = ""
@@ -653,7 +615,10 @@ class OrbAlgorithm(QCAlgorithm):
         for symbol in self.symbols:
             if self.portfolio[symbol].invested:
                 price = self.securities[symbol].price
-                self.exit_position(symbol, price, "EOD")
+                if symbol in self.trade_mgr.orf_entries:
+                    self.exit_orf_position(symbol, price, "ORF_EOD")
+                else:
+                    self.exit_position(symbol, price, "EOD")
         self._log("[EOD CLOSE] All positions flattened")
 
     def _load_from_scanner(self):
@@ -679,7 +644,6 @@ class OrbAlgorithm(QCAlgorithm):
         if not self._is_trading_day():
             return
 
-        # Flush previous day's signal rejections to ObjectStore buffer
         day_rejects = self.signal_engine.get_and_clear_reject_buffer()
         self._all_reject_rows.extend(day_rejects)
 
@@ -699,11 +663,9 @@ class OrbAlgorithm(QCAlgorithm):
         self._alloc_rejected_today.clear()
         self._actual_entry_fills.clear()
         self._entry_order_ids.clear()
-        # Safety net: flush pending exits that missed fill events
         self._flush_pending_exits()
         self._exit_order_ids.clear()
         self.day_start_equity = self.portfolio.total_portfolio_value
-        # Reset daily state for all symbols — scanner/sheet will re-qualify at 9:15/9:20
         for symbol in self.symbols:
             self.orb.reset(symbol)
             self.symbol_direction[symbol] = None
@@ -711,13 +673,11 @@ class OrbAlgorithm(QCAlgorithm):
             hist = self.history(symbol, 2, Resolution.DAILY)
             if not hist.empty and len(hist) >= 1:
                 self.prior_close[symbol] = hist["close"].iloc[-1]
-        # Clear auto-scanner state so new candidates replace old ones
         self.auto_universe_candidates.clear()
         self.symbol_meta.clear()
 
     def _tag_direction(self, symbol):
         """Tag symbol as LONG or SHORT based on symbol_meta, FORCE_DIRECTION, or gap."""
-        # Priority 1: symbol_meta from Google Sheets (overrides FORCE_DIRECTION)
         meta = self.symbol_meta.get(symbol)
         if meta:
             self.symbol_direction[symbol] = meta["direction"]
@@ -725,7 +685,6 @@ class OrbAlgorithm(QCAlgorithm):
             self.debug(f"[SHEET_DIRECTION] {symbol} tagged {meta['direction']} (T{meta['tier']})")
             return True
 
-        # Priority 2: FORCE_DIRECTION config
         if self.config.FORCE_DIRECTION == 1:
             self.symbol_direction[symbol] = "LONG"
             self.gap_qualified[symbol] = True
@@ -777,7 +736,6 @@ class OrbAlgorithm(QCAlgorithm):
 
         if not self.daily_halt and daily_loss >= starting_cash * 0.02:
             self._log(f"[DAILY HALT] Loss ${daily_loss:.2f} hit 2% limit — liquidating all")
-            # Send SS close commands for all open positions before QC liquidate
             if self.config.SS_ENABLED and self.config.SS_CONFIRM_FIRST:
                 for sym in list(self.trade_mgr.entries.keys()):
                     is_long = self.trade_mgr.is_long(sym)
@@ -792,14 +750,12 @@ class OrbAlgorithm(QCAlgorithm):
 
     def on_data(self, data):
         try:
-            # Skip non-trading hours
             if not self._is_trading_day():
                 return
             bar_time = self.time.time()
             if bar_time < time(9, 30) or bar_time >= time(16, 0):
                 return
 
-            # Late-start catch-up (LIVE ONLY)
             if not self._catchup_done and self.live_mode:
                 has_universe = any(self.gap_qualified.get(s) for s in self.symbols)
                 catchup_cutoff = time(15, 30)  # give up after 3:30 PM (matches entry cutoff)
@@ -836,7 +792,6 @@ class OrbAlgorithm(QCAlgorithm):
             if self.daily_halt:
                 return
 
-            # Daily diagnostic: log symbol states once at 9:46 (1 min after ORB lock)
             if bar_time == time(9, 46) and not self._diag_done_today:
                 self._diag_done_today = True
                 ss = self.symbols
@@ -855,31 +810,37 @@ class OrbAlgorithm(QCAlgorithm):
 
                 bar = data.bars[symbol]
 
-                # Track previous bar for higher/lower close filter
                 self.signal_engine.update_prev_bar(symbol, bar)
 
-                # Build ORB range during opening period
                 self.orb.update(symbol, bar)
 
-                # Skip if ORB not locked or indicators not ready
                 if not self.orb.is_locked(symbol):
                     continue
                 if not self.indicators.is_ready(symbol):
                     continue
 
+                # ORF position management (before ORB)
+                if symbol in self.trade_mgr.orf_entries:
+                    vwap_c = self.indicators.get_vwap(symbol)
+                    orf_exit, orf_reason = self.trade_mgr.process_orf_bar(symbol, bar.close, bar.high, bar.low, vwap_c)
+                    if orf_exit:
+                        self.exit_orf_position(symbol, bar.close, orf_reason)
+                    continue
+
+                # ORF false breakout tracker
+                if self.orb.is_locked(symbol):
+                    self.signal_engine.update_orf_tracker(symbol, bar)
+
                 atr = self.indicators.get_atr(symbol)
                 is_invested = self.portfolio[symbol].invested
 
-                # Manage open positions
                 if is_invested:
-                    # Unified bar processing: Step 1-5 in strict order
                     vwap_current = self.indicators.get_vwap(symbol)
                     stopped, reason = self.trade_mgr.process_bar(
                         symbol, bar.close, bar.high, bar.low, atr, vwap_current
                     )
                     if stopped:
                         if reason.startswith("TP"):
-                            # Partial take profit — sell portion, keep position open
                             tp_idx = int(reason[2]) - 1
                             tp_shares = self.trade_mgr.entries[symbol]["tp_shares"][tp_idx]
                             tp_price = self.trade_mgr.entries[symbol]["tp_prices"][tp_idx]
@@ -889,18 +850,15 @@ class OrbAlgorithm(QCAlgorithm):
                             self.exit_position(symbol, bar.close, reason)
                         continue
 
-                    # Step 5 continued: EMA cross exit
                     ema_fast = self.indicators.get_ema_fast(symbol)
                     ema_mid = self.indicators.get_ema_mid(symbol)
                     if self.trade_mgr.check_ema_cross_exit(symbol, ema_fast, ema_mid):
                         self.exit_position(symbol, bar.close, "EMA_CROSS")
                     continue
 
-                # Tag direction on first bar after ORB lock if not yet tagged
                 if not self.gap_qualified.get(symbol, False):
                     if not self._tag_direction(symbol):
                         continue
-                    # Store gap_pct on signal engine for gap direction gate
                     prior = self.prior_close.get(symbol, 0)
                     today_open = self.securities[symbol].open
                     gap_pct = (today_open - prior) / prior if prior > 0 else 0
@@ -910,7 +868,6 @@ class OrbAlgorithm(QCAlgorithm):
                 if direction is None:
                     continue
 
-                # Spread check — reject if bid-ask spread > MAX_SPREAD_PCT of mid-price
                 security = self.securities[symbol]
                 bid = security.bid_price
                 ask = security.ask_price
@@ -924,15 +881,12 @@ class OrbAlgorithm(QCAlgorithm):
                         self._log(f"[SPREAD REJECT] {symbol} spread={spread_pct:.3f}% (${spread:.3f}) bid={bid:.2f} ask={ask:.2f} max={self.config.MAX_SPREAD_PCT}%")
                     continue
 
-                # Late-entry cutoff — no new entries after configured time
                 if bar_time > self.config.LAST_ENTRY_TIME:
                     continue
 
-                # Price floor — block entries below MIN_PRICE regardless of how symbol entered universe
                 if bar.close < self.config.AUTO_MIN_PRICE:
                     continue
 
-                # Trend alignment gate — only for sheet-loaded symbols (scanner already filtered)
                 if self.config.AUTO_TREND_FILTER and self._sheet_loaded_today:
                     ts = self.auto_universe_candidates.get(symbol, {}).get("trend_signals", 0)
                     if direction == "SHORT" and ts >= 2:
@@ -940,13 +894,12 @@ class OrbAlgorithm(QCAlgorithm):
                     if direction == "LONG" and ts <= -2:
                         continue
 
-                # Only trade the tagged direction for this symbol (per-symbol daily limits)
                 if direction == "LONG":
                     if not self.risk_mgr.can_trade_long(symbol):
                         sym_key = str(symbol)
                         if sym_key not in self._alloc_rejected_today:
                             self._alloc_rejected_today.add(sym_key)
-                            self._log(f"[LIMIT] {symbol} LONG — sym={self.risk_mgr.get_symbol_long_count(symbol)}/{self.config.MAX_DAILY_LONGS} total={self.risk_mgr.total_long_entries()}/{self.config.MAX_DAILY_TOTAL_LONGS} losses={self.risk_mgr.total_losses()}/{self.config.MAX_DAILY_TOTAL_LOSSES} open={self.risk_mgr.open_long_count()}/{self.config.MAX_LONGS}")
+                            self.debug(f"[LIMIT] {symbol} L")
                     elif self.signal_engine.check_long(symbol, bar):
                         self.enter_long(symbol, bar, is_long=True)
                 elif direction == "SHORT":
@@ -954,9 +907,19 @@ class OrbAlgorithm(QCAlgorithm):
                         sym_key = str(symbol)
                         if sym_key not in self._alloc_rejected_today:
                             self._alloc_rejected_today.add(sym_key)
-                            self._log(f"[LIMIT] {symbol} SHORT — sym={self.risk_mgr.get_symbol_short_count(symbol)}/{self.config.MAX_DAILY_SHORTS} total={self.risk_mgr.total_short_entries()}/{self.config.MAX_DAILY_TOTAL_SHORTS} losses={self.risk_mgr.total_losses()}/{self.config.MAX_DAILY_TOTAL_LOSSES} open={self.risk_mgr.open_short_count()}/{self.config.MAX_SHORTS}")
+                            self.debug(f"[LIMIT] {symbol} S")
                     elif self.signal_engine.check_short(symbol, bar):
                         self.enter_short(symbol, bar, is_long=False)
+
+                # ORF entry checks (only if not in ORB position)
+                if self.config.STRATEGY_MODE in ("ORF", "BOTH") and not self.portfolio[symbol].invested:
+                    if self.signal_engine.check_orf_long(symbol, bar):
+                        if self.risk_mgr.can_trade_orf_long(self.trade_mgr):
+                            self.enter_orf_long(symbol, bar)
+                    elif self.signal_engine.check_orf_short(symbol, bar):
+                        if self.risk_mgr.can_trade_orf_short(self.trade_mgr):
+                            self.enter_orf_short(symbol, bar)
+
         except Exception as e:
             self.log(f"[ON_DATA ERROR] {str(e)}")
 
@@ -1012,7 +975,6 @@ class OrbAlgorithm(QCAlgorithm):
         meta = self.symbol_meta.get(symbol, {})
         auto = self.auto_universe_candidates.get(symbol, {})
 
-        # Determine source
         if self.config.USE_AUTO_UNIVERSE and auto:
             source = "AUTO"
         elif self.config.UNIVERSE_SHEET_URL and meta:
@@ -1036,7 +998,6 @@ class OrbAlgorithm(QCAlgorithm):
         if shares <= 0:
             return
 
-        # SG gamma size reduction
         if (self.config.SG_ENABLED and self.config.SG_USE_GAMMA_REGIME
                 and self.config.SG_GAMMA_NEGATIVE_ACTION == "reduce" and self.sg_mgr):
             regime = self.sg_mgr.get_gamma_regime(symbol)
@@ -1045,7 +1006,6 @@ class OrbAlgorithm(QCAlgorithm):
                 shares = max(1, math.floor(shares * self.config.SG_GAMMA_NEGATIVE_SIZE_MULT))
                 self._log(f"[SG] {symbol} L neg gamma s={shares}")
 
-        # Alloc guard
         if not self.risk_mgr.check_allocation(shares, price):
             self._log(f"[ALLOC] {symbol} blocked ${shares*price:.0f}")
             return
@@ -1056,7 +1016,6 @@ class OrbAlgorithm(QCAlgorithm):
         sg_snapshot = self._build_sg_snapshot(symbol)
         filter_evals = self.signal_engine.evaluate_filters_at_entry(symbol, bar, is_long=True)
         universe_meta = self._build_universe_meta(symbol)
-        # SS confirm-first
         if self.config.SS_ENABLED and self.config.SS_CONFIRM_FIRST:
             success, ss_resp = self.bridge.send_and_confirm(str(symbol), "buy", shares)
             if not success:
@@ -1081,7 +1040,6 @@ class OrbAlgorithm(QCAlgorithm):
         if shares <= 0:
             return
 
-        # SG gamma size reduction
         if (self.config.SG_ENABLED and self.config.SG_USE_GAMMA_REGIME
                 and self.config.SG_GAMMA_NEGATIVE_ACTION == "reduce" and self.sg_mgr):
             regime = self.sg_mgr.get_gamma_regime(symbol)
@@ -1090,7 +1048,6 @@ class OrbAlgorithm(QCAlgorithm):
                 shares = max(1, math.floor(shares * self.config.SG_GAMMA_NEGATIVE_SIZE_MULT))
                 self._log(f"[SG] {symbol} S neg gamma s={shares}")
 
-        # Alloc guard
         if not self.risk_mgr.check_allocation(shares, price):
             self._log(f"[ALLOC] {symbol} blocked ${shares*price:.0f}")
             return
@@ -1101,7 +1058,6 @@ class OrbAlgorithm(QCAlgorithm):
         sg_snapshot = self._build_sg_snapshot(symbol)
         filter_evals = self.signal_engine.evaluate_filters_at_entry(symbol, bar, is_long=False)
         universe_meta = self._build_universe_meta(symbol)
-        # SS confirm-first
         if self.config.SS_ENABLED and self.config.SS_CONFIRM_FIRST:
             success, ss_resp = self.bridge.send_and_confirm(str(symbol), "sell_short", shares)
             if not success:
@@ -1119,6 +1075,77 @@ class OrbAlgorithm(QCAlgorithm):
             self.bridge.send(str(symbol), "sell_short", shares)
         self._log(f"[S] {symbol} s={shares} p={price:.2f}")
 
+    def enter_orf_long(self, symbol, bar):
+        import math
+        price, atr, vwap = bar.close, self.indicators.get_atr(symbol), self.indicators.get_vwap(symbol)
+        stop_dist = atr * self.config.ORF_HARD_STOP_ATR_MULT
+        if stop_dist <= 0: return
+        adj_risk = self.config.BASE_DAILY_RISK * self.config.REGIME_CURRENT
+        shares = min(math.floor(adj_risk / stop_dist), math.floor(self.config.MAX_TOTAL_ALLOCATED / price))
+        if shares <= 0: return
+        if not self.risk_mgr.check_allocation(shares, price): return
+        if symbol in self.trade_mgr.entries: return
+        fb = self.signal_engine.orf_false_breakout.get(symbol, {})
+        false_ext = fb.get("extreme", self.orb.get_low(symbol))
+        self.market_order(symbol, shares)
+        self.trade_mgr.open_orf_position(symbol, True, price, shares, atr, vwap,
+            self.orb.get_high(symbol), self.orb.get_low(symbol), false_ext)
+        self.signal_engine.record_orf_entry(symbol)
+        self.risk_mgr.add_allocation(shares, price)
+        if self.config.SS_ENABLED: self.bridge.send(str(symbol), "buy", shares)
+        self._log(f"[ORF L] {symbol} s={shares} p={price:.2f}")
+
+    def enter_orf_short(self, symbol, bar):
+        import math
+        price, atr, vwap = bar.close, self.indicators.get_atr(symbol), self.indicators.get_vwap(symbol)
+        stop_dist = atr * self.config.ORF_HARD_STOP_ATR_MULT
+        if stop_dist <= 0: return
+        adj_risk = self.config.BASE_DAILY_RISK * self.config.REGIME_CURRENT
+        shares = min(math.floor(adj_risk / stop_dist), math.floor(self.config.MAX_TOTAL_ALLOCATED / price))
+        if shares <= 0: return
+        if not self.risk_mgr.check_allocation(shares, price): return
+        if symbol in self.trade_mgr.entries: return
+        fb = self.signal_engine.orf_false_breakout.get(symbol, {})
+        false_ext = fb.get("extreme", self.orb.get_high(symbol))
+        self.market_order(symbol, -shares)
+        self.trade_mgr.open_orf_position(symbol, False, price, shares, atr, vwap,
+            self.orb.get_high(symbol), self.orb.get_low(symbol), false_ext)
+        self.signal_engine.record_orf_entry(symbol)
+        self.risk_mgr.add_allocation(shares, price)
+        if self.config.SS_ENABLED: self.bridge.send(str(symbol), "sell_short", shares)
+        self._log(f"[ORF S] {symbol} s={shares} p={price:.2f}")
+
+    def exit_orf_position(self, symbol, price, reason):
+        entry = self.trade_mgr.orf_entries.get(symbol)
+        if not entry: return
+        is_long, shares = entry["is_long"], entry["shares"]
+        self.market_order(symbol, -shares if is_long else shares)
+        if self.config.SS_ENABLED:
+            self.bridge.send(str(symbol), "sell" if is_long else "buy_to_cover", shares)
+        pnl = (price - entry["entry_price"]) * shares * (1 if is_long else -1)
+        self.risk_mgr.remove_allocation(shares, entry["entry_price"])
+        if pnl > 0: self.total_wins += 1; self.total_profit += pnl
+        else: self.total_losses += 1; self.total_loss_amt += abs(pnl)
+        # Minimal trade record
+        cfg = self.config
+        row = {col: "" for col in TRADE_LOG_COLUMNS}
+        row.update({
+            "trade_id": f"ORF-{self.time.strftime('%H%M%S')}", "strategy_type": "ORF",
+            "strategy_mode": getattr(cfg, 'STRATEGY_MODE', 'ORB'),
+            "date": self.time.strftime("%Y-%m-%d"), "symbol": str(symbol),
+            "direction": "LONG" if is_long else "SHORT",
+            "entry_price": round(entry["entry_price"], 2), "exit_price": round(price, 2),
+            "shares": shares, "pnl": round(pnl, 2), "reason": reason,
+            "hard_stop": round(entry["hard_stop"], 2),
+            "orb_high": round(self.orb.get_high(symbol) or 0, 2),
+            "orb_low": round(self.orb.get_low(symbol) or 0, 2),
+            "p_regime_current": cfg.REGIME_CURRENT,
+            "p_regime_label": getattr(cfg, 'REGIME_LABEL', ''),
+        })
+        self.trade_log_rows.append(TradeManager.format_record_row(row))
+        self.trade_mgr.close_orf_position(symbol)
+        self._log(f"[ORF EXIT] {symbol} {reason} pnl=${pnl:.2f}")
+
     def partial_exit(self, symbol, price, tp_shares, reason, tp_price):
         """Execute a partial take-profit exit — sell portion, keep position open."""
         if not self.portfolio[symbol].invested:
@@ -1128,7 +1155,6 @@ class OrbAlgorithm(QCAlgorithm):
         is_long = self.trade_mgr.is_long(symbol)
         entry_price = self.trade_mgr.entries[symbol]["price"]
 
-        # Clamp tp_shares to remaining position size
         remaining = abs(self.portfolio[symbol].quantity)
         shares_to_exit = min(tp_shares, remaining)
         if shares_to_exit <= 0:
@@ -1136,31 +1162,25 @@ class OrbAlgorithm(QCAlgorithm):
 
         action = "sell" if is_long else "buy_to_cover"
 
-        # SS confirm partial
         if self.config.SS_ENABLED and self.config.SS_CONFIRM_FIRST:
             success, ss_resp = self.bridge.send_and_confirm(str(symbol), action, shares_to_exit)
             if not success:
                 self._log(f"[SS_PARTIAL_EXIT_FAIL] {symbol} — broker rejected: {ss_resp}")
 
-        # Execute partial order
         if is_long:
             self.market_order(symbol, -shares_to_exit)
         else:
             self.market_order(symbol, shares_to_exit)
 
-        # Mark TP level as hit in trade_mgr
         tp_idx = int(reason[2]) - 1
         self.trade_mgr.entries[symbol]["tp_hit"][tp_idx] = True
         self.trade_mgr.entries[symbol]["tp_fill_prices"][tp_idx] = price
 
-        # Release capital for the partial shares
         self.risk_mgr.remove_allocation(shares_to_exit, entry_price)
 
-        # Send to SignalStack (fire-and-forget mode only)
         if not (self.config.SS_ENABLED and self.config.SS_CONFIRM_FIRST):
             self.bridge.send(str(symbol), action, shares_to_exit)
 
-        # Calculate partial P&L for logging
         if is_long:
             partial_pnl = (price - entry_price) * shares_to_exit
         else:
@@ -1171,7 +1191,6 @@ class OrbAlgorithm(QCAlgorithm):
                  f"remaining={remaining - shares_to_exit}")
 
     def exit_position(self, symbol, price, reason=""):
-        # Portfolio invested guard — don't liquidate already-closed positions
         if not self.portfolio[symbol].invested:
             self._log(f"[EXIT SKIP] {symbol} — not invested, clearing internal state only")
             self.trade_mgr.remove(symbol)
@@ -1186,7 +1205,6 @@ class OrbAlgorithm(QCAlgorithm):
         entry_price = self._actual_entry_fills.get(symbol, self.trade_mgr.entries[symbol]["price"])
         quantity = abs(self.portfolio[symbol].quantity)
 
-        # Store pending exit — PnL will be computed in on_order_event with actual fill price
         self._pending_exits[symbol] = {
             "entry_price": entry_price,
             "is_long": is_long,
@@ -1195,7 +1213,6 @@ class OrbAlgorithm(QCAlgorithm):
             "signal_price": price,
         }
 
-        # Release capital allocation and close position tracking (doesn't need exit fill)
         self.risk_mgr.remove_allocation(quantity, entry_price)
         self.risk_mgr.close_position(symbol)
 
@@ -1237,14 +1254,11 @@ class OrbAlgorithm(QCAlgorithm):
         symbol = order_event.symbol
         fill_price = float(order_event.fill_price)
 
-        # Entry fill — update entry price in trade manager
         if oid in self._entry_order_ids:
             self._actual_entry_fills[symbol] = fill_price
-            # Update trade_mgr entry with actual fill price
             if symbol in self.trade_mgr.entries:
                 entry = self.trade_mgr.entries[symbol]
                 entry["price"] = fill_price
-                # Recalculate hard stop from actual fill
                 atr = entry.get("atr", 0)
                 if entry["is_long"]:
                     if self.config.LONG_HARD_STOP_MODE == "atr" and atr > 0:
@@ -1256,14 +1270,12 @@ class OrbAlgorithm(QCAlgorithm):
                         entry["hard_stop"] = fill_price + atr * self.config.SHORT_HARD_STOP_ATR_MULT
                     else:
                         entry["hard_stop"] = fill_price * (1 + self.config.SHORT_HARD_STOP_PCT)
-                # Update open record too
                 if symbol in self.trade_mgr.open_records:
                     rec = self.trade_mgr.open_records[symbol]
                     rec["entry_price"] = round(fill_price, 2)
                     rec["hard_stop"] = round(entry["hard_stop"], 2)
             del self._entry_order_ids[oid]
 
-        # Exit fill — match by pending exit (liquidate() may not return tickets)
         elif symbol in self._pending_exits:
             pending = self._pending_exits[symbol]
             entry_price = pending["entry_price"]
@@ -1323,7 +1335,6 @@ class OrbAlgorithm(QCAlgorithm):
         self.object_store.save(key, csv_content)
         self._log(f"[TRADE_LOG] {len(self.trade_log_rows)} trades → {key}")
 
-        # Compact summary
         total_pnl = self.total_profit - self.total_loss_amt
         self._log(f"[SUMMARY] W:{self.total_wins} L:{self.total_losses} PnL:${total_pnl:.2f}")
 

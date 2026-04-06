@@ -134,3 +134,11 @@ class RiskManager:
         self.allocated_dollars = 0.0
         self._open_longs.clear()
         self._open_shorts.clear()
+
+    # ── ORF position limits ──────────────────────────────────────
+
+    def can_trade_orf_long(self, trade_mgr) -> bool:
+        return sum(1 for e in trade_mgr.orf_entries.values() if e["is_long"]) < self.config.ORF_MAX_LONGS
+
+    def can_trade_orf_short(self, trade_mgr) -> bool:
+        return sum(1 for e in trade_mgr.orf_entries.values() if not e["is_long"]) < self.config.ORF_MAX_SHORTS

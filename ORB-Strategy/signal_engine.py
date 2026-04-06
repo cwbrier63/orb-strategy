@@ -40,12 +40,17 @@ class SignalEngine:
         self._daily_rejected = {}
         # Buffer for ObjectStore CSV (first rejection per symbol/reason/day)
         self._reject_buffer = []
+        # ORF false breakout tracking
+        self.orf_false_breakout = {}  # {symbol: {"bar_time", "direction", "extreme"}}
+        self.orf_daily_count = {}     # {symbol: int}
 
     def reset_daily(self):
         self.long_breakout_bar.clear()
         self.short_breakout_bar.clear()
         self.bar_count.clear()
         self._daily_rejected.clear()
+        self.orf_false_breakout.clear()
+        self.orf_daily_count.clear()
 
     def set_gap_pct(self, symbol, gap_pct):
         """Store gap pct (decimal) for gap direction gate."""
@@ -542,3 +547,97 @@ class SignalEngine:
                 return False
 
         return True
+
+    # ── ORF (Opening Range Fade) Methods ──────────────────────────
+
+    def update_orf_tracker(self, symbol, bar):
+        """Track false breakouts for ORF. Call every bar after ORB locks."""
+        cfg = self.config
+        if cfg.STRATEGY_MODE not in ("ORF", "BOTH"):
+            return
+        if not self.orb.is_locked(symbol):
+            return
+        if self.orf_daily_count.get(symbol, 0) >= cfg.ORF_MAX_DAILY_PER_SYMBOL:
+            return
+        orb_high = self.orb.get_high(symbol)
+        orb_low = self.orb.get_low(symbol)
+        if orb_high is None or orb_low is None:
+            return
+        offset = cfg.LONG_BREAKOUT_OFFSET
+        if bar.close > orb_high + offset:
+            self.orf_false_breakout[symbol] = {
+                "bar_time": self.algo.time, "direction": "up", "extreme": bar.high}
+        elif bar.close < orb_low - offset:
+            self.orf_false_breakout[symbol] = {
+                "bar_time": self.algo.time, "direction": "down", "extreme": bar.low}
+
+    def check_orf_short(self, symbol, bar) -> bool:
+        """ORF short: false upside breakout then re-entry below ORB high."""
+        cfg = self.config
+        if cfg.STRATEGY_MODE not in ("ORF", "BOTH"):
+            return False
+        if cfg.REGIME_CURRENT > cfg.ORF_MAX_REGIME:
+            return False
+        fb = self.orf_false_breakout.get(symbol)
+        if not fb or fb["direction"] != "up":
+            return False
+        bars_since = int((self.algo.time - fb["bar_time"]).total_seconds() / 60)
+        if bars_since > cfg.ORF_BREAKOUT_LOOKBACK_BARS:
+            self.orf_false_breakout.pop(symbol, None)
+            return False
+        orb_high = self.orb.get_high(symbol)
+        if bar.close >= orb_high:
+            return False
+        if cfg.ORF_REQUIRE_VWAP and bar.close >= self.indicators.get_vwap(symbol):
+            return False
+        orb_range = self.orb.get_range(symbol)
+        atr = self.indicators.get_atr(symbol)
+        if atr > 0 and orb_range is not None and orb_range > cfg.ORF_MAX_ORB_RANGE_ATR * atr:
+            return False
+        if bar.volume < cfg.ORF_MIN_ENTRY_VOLUME:
+            return False
+        if self.algo.time.time() >= cfg.ORF_LAST_ENTRY_TIME:
+            return False
+        if atr <= 0:
+            return False
+        if self.orf_daily_count.get(symbol, 0) >= cfg.ORF_MAX_DAILY_PER_SYMBOL:
+            return False
+        return True
+
+    def check_orf_long(self, symbol, bar) -> bool:
+        """ORF long: false downside breakout then re-entry above ORB low."""
+        cfg = self.config
+        if cfg.STRATEGY_MODE not in ("ORF", "BOTH"):
+            return False
+        if cfg.REGIME_CURRENT > cfg.ORF_MAX_REGIME:
+            return False
+        fb = self.orf_false_breakout.get(symbol)
+        if not fb or fb["direction"] != "down":
+            return False
+        bars_since = int((self.algo.time - fb["bar_time"]).total_seconds() / 60)
+        if bars_since > cfg.ORF_BREAKOUT_LOOKBACK_BARS:
+            self.orf_false_breakout.pop(symbol, None)
+            return False
+        orb_low = self.orb.get_low(symbol)
+        if bar.close <= orb_low:
+            return False
+        if cfg.ORF_REQUIRE_VWAP and bar.close <= self.indicators.get_vwap(symbol):
+            return False
+        orb_range = self.orb.get_range(symbol)
+        atr = self.indicators.get_atr(symbol)
+        if atr > 0 and orb_range is not None and orb_range > cfg.ORF_MAX_ORB_RANGE_ATR * atr:
+            return False
+        if bar.volume < cfg.ORF_MIN_ENTRY_VOLUME:
+            return False
+        if self.algo.time.time() >= cfg.ORF_LAST_ENTRY_TIME:
+            return False
+        if atr <= 0:
+            return False
+        if self.orf_daily_count.get(symbol, 0) >= cfg.ORF_MAX_DAILY_PER_SYMBOL:
+            return False
+        return True
+
+    def record_orf_entry(self, symbol):
+        """Increment counter and clear false breakout after ORF entry fires."""
+        self.orf_daily_count[symbol] = self.orf_daily_count.get(symbol, 0) + 1
+        self.orf_false_breakout.pop(symbol, None)

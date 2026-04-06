@@ -1,4 +1,6 @@
 from AlgorithmImports import *
+import http.client
+import ssl
 
 
 class RegimeDetector:
@@ -130,3 +132,47 @@ class RegimeDetector:
         self.short_mult = 1.0
         self.overnight_return = 0.0
         self.es_fading = False
+
+    def load_regime_from_supabase(self):
+        """Load regime classifier fields from Supabase market_regime table.
+        Populates REGIME_COMPOSITE_SCORE, REGIME_BREADTH_PCT, etc.
+        Non-fatal — empty fields if table/row doesn't exist."""
+        try:
+            today = self.algo.time.strftime("%Y-%m-%d")
+            host = self.config.SG_SUPABASE_URL.replace("https://", "")
+            key = self.config.SG_SUPABASE_KEY
+            path = (f"/rest/v1/market_regime?scan_date=eq.{today}"
+                    f"&select=regime_label,regime_multiplier,composite_score,"
+                    f"mode,breadth_pct,sector_advancers,futures_available,"
+                    f"es_overnight_ret,leading_sector,lagging_sector"
+                    f"&limit=1")
+            hdrs = {"apikey": key, "Authorization": f"Bearer {key}", "Accept": "application/json"}
+            ctx = ssl.create_default_context()
+            conn = http.client.HTTPSConnection(host, timeout=30, context=ctx)
+            conn.request("GET", path, headers=hdrs)
+            resp = conn.getresponse()
+            raw = resp.read().decode("utf-8")
+            conn.close()
+            if not raw or raw.strip() in ("", "[]"):
+                return
+            import json
+            rows = json.loads(raw)
+            if not rows:
+                return
+            row = rows[0]
+            # Populate config fields
+            mult = float(row.get("regime_multiplier") or self.config.REGIME_CURRENT)
+            self.config.REGIME_CURRENT = mult
+            self.regime_label = str(row.get("regime_label") or "NEUTRAL")
+            self.config.REGIME_LABEL = self.regime_label
+            self.config.REGIME_COMPOSITE_SCORE = float(row.get("composite_score") or 0)
+            self.config.REGIME_MODE = str(row.get("mode") or "")
+            self.config.REGIME_BREADTH_PCT = float(row.get("breadth_pct") or 0)
+            self.config.REGIME_SECTOR_ADVANCERS = int(row.get("sector_advancers") or 0)
+            self.config.REGIME_FUTURES_AVAILABLE = bool(row.get("futures_available", False))
+            self.config.REGIME_ES_RET = float(row.get("es_overnight_ret") or 0)
+            self.config.REGIME_LEADING_SECTOR = str(row.get("leading_sector") or "")
+            self.config.REGIME_LAGGING_SECTOR = str(row.get("lagging_sector") or "")
+            self.algo._log(f"[REGIME] Supabase: {self.regime_label} mult={mult} score={self.config.REGIME_COMPOSITE_SCORE:.1f}")
+        except Exception as e:
+            self.algo._log(f"[REGIME] Supabase load failed: {e} — using defaults")

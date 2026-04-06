@@ -5,7 +5,7 @@ from AlgorithmImports import *
 # ═══════════════════════════════════════════
 TRADE_LOG_COLUMNS = [
     # Group 1: Trade Identity & Outcome
-    'trade_id', 'date', 'symbol', 'direction',
+    'trade_id', 'strategy_type', 'strategy_mode', 'date', 'symbol', 'direction',
     'entry_time', 'exit_time', 'duration_bars',
     'entry_price', 'exit_price', 'shares', 'pnl', 'pnl_pct',
     'mae', 'mae_pct', 'mfe', 'mfe_pct', 'mfe_captured_pct',
@@ -23,6 +23,9 @@ TRADE_LOG_COLUMNS = [
     # Group 4: Config Parameters (shared)
     'p_account_size', 'p_base_daily_risk', 'p_max_total_allocated', 'p_regime_current',
     'p_regime_label', 'p_regime_long_mult', 'p_regime_short_mult', 'p_regime_overnight',
+    'p_regime_composite_score', 'p_regime_mode', 'p_regime_breadth_pct',
+    'p_regime_sector_advancers', 'p_regime_futures_available', 'p_regime_es_ret',
+    'p_regime_leading_sector', 'p_regime_lagging_sector',
     'p_gap_filter_pct', 'p_ema_fast', 'p_ema_mid', 'p_ema_slow', 'p_atr_period',
     'p_max_daily_longs', 'p_max_daily_shorts',
     'p_max_daily_losses_long', 'p_max_daily_losses_short', 'p_force_direction',
@@ -98,6 +101,7 @@ class TradeManager:
         self.stops = {}
         self.entries = {}
         self.open_records = {}
+        self.orf_entries = {}  # {symbol: {is_long, entry_price, hard_stop, tp_vwap, tp_orb, shares, ...}}
 
     # ─── Entry Registration ───────────────────────────────────────
 
@@ -422,6 +426,7 @@ class TradeManager:
         self.entries.clear()
         self.stops.clear()
         self.open_records.clear()
+        self.orf_entries.clear()
 
     # ═══════════════════════════════════════════
     # Trade Record System
@@ -503,6 +508,8 @@ class TradeManager:
         rec = {
             # Group 1: Trade Identity & Outcome
             'trade_id': trade_id,
+            'strategy_type': 'ORB',
+            'strategy_mode': getattr(config, 'STRATEGY_MODE', 'ORB'),
             'date': self.algo.time.strftime("%Y-%m-%d"),
             'symbol': str(symbol),
             'direction': 'LONG' if is_long else 'SHORT',
@@ -551,6 +558,14 @@ class TradeManager:
             'p_regime_long_mult': config.REGIME_LONG_MULT,
             'p_regime_short_mult': config.REGIME_SHORT_MULT,
             'p_regime_overnight': round(config.REGIME_OVERNIGHT_RET, 5),
+            'p_regime_composite_score': round(getattr(config, 'REGIME_COMPOSITE_SCORE', 0), 2),
+            'p_regime_mode': getattr(config, 'REGIME_MODE', ''),
+            'p_regime_breadth_pct': round(getattr(config, 'REGIME_BREADTH_PCT', 0), 4),
+            'p_regime_sector_advancers': getattr(config, 'REGIME_SECTOR_ADVANCERS', 0),
+            'p_regime_futures_available': getattr(config, 'REGIME_FUTURES_AVAILABLE', False),
+            'p_regime_es_ret': round(getattr(config, 'REGIME_ES_RET', 0), 5),
+            'p_regime_leading_sector': getattr(config, 'REGIME_LEADING_SECTOR', ''),
+            'p_regime_lagging_sector': getattr(config, 'REGIME_LAGGING_SECTOR', ''),
             'p_gap_filter_pct': config.GAP_FILTER_PCT,
             'p_ema_fast': config.EMA_FAST,
             'p_ema_mid': config.EMA_MID,
@@ -854,3 +869,48 @@ class TradeManager:
             else:
                 vals.append(str(v))
         return ','.join(vals)
+
+    # ── ORF Position Management ──────────────────────────────────
+
+    def open_orf_position(self, symbol, is_long, entry_price, shares, atr, vwap, orb_high, orb_low, false_extreme):
+        cfg = self.config
+        if is_long:
+            hard_stop = false_extreme - atr * cfg.ORF_HARD_STOP_ATR_MULT
+            tp_orb = orb_high if cfg.ORF_USE_ORB_TARGET else None
+        else:
+            hard_stop = false_extreme + atr * cfg.ORF_HARD_STOP_ATR_MULT
+            tp_orb = orb_low if cfg.ORF_USE_ORB_TARGET else None
+        self.orf_entries[symbol] = {
+            "is_long": is_long, "entry_price": entry_price, "shares": shares,
+            "hard_stop": hard_stop, "tp_vwap": vwap, "tp_orb": tp_orb,
+            "false_extreme": false_extreme, "entry_time": self.algo.time,
+            "vwap_wrong_side_bars": 0,
+        }
+        self.algo._log(f"[ORF OPEN] {symbol} {'L' if is_long else 'S'} e={entry_price:.2f} stop={hard_stop:.2f} vwap={vwap:.2f}")
+
+    def process_orf_bar(self, symbol, bar_close, bar_high, bar_low, vwap):
+        """Manage open ORF position. Returns (should_exit, reason)."""
+        if symbol not in self.orf_entries:
+            return False, ""
+        e = self.orf_entries[symbol]
+        is_long = e["is_long"]
+        # 1. Hard stop
+        if is_long and bar_low <= e["hard_stop"]:
+            return True, "ORF_HARD_STOP"
+        if not is_long and bar_high >= e["hard_stop"]:
+            return True, "ORF_HARD_STOP"
+        # 2. Primary target: VWAP
+        if is_long and bar_high >= e["tp_vwap"]:
+            return True, "ORF_TP_VWAP"
+        if not is_long and bar_low <= e["tp_vwap"]:
+            return True, "ORF_TP_VWAP"
+        # 3. Secondary target: opposite ORB boundary
+        if e["tp_orb"] is not None:
+            if is_long and bar_high >= e["tp_orb"]:
+                return True, "ORF_TP_ORB"
+            if not is_long and bar_low <= e["tp_orb"]:
+                return True, "ORF_TP_ORB"
+        return False, ""
+
+    def close_orf_position(self, symbol):
+        self.orf_entries.pop(symbol, None)

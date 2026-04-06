@@ -23,6 +23,15 @@ class OrbConfig:
     REGIME_MIN_DIRECTION_MULT = 0.20   # Hedge floor — neither direction goes to zero
     REGIME_LABEL = "NEUTRAL"
     REGIME_OVERNIGHT_RET = 0.0
+    # Regime classifier fields (set by regime_detector from Supabase, empty when unavailable)
+    REGIME_COMPOSITE_SCORE = 0.0
+    REGIME_MODE = ""
+    REGIME_BREADTH_PCT = 0.0
+    REGIME_SECTOR_ADVANCERS = 0
+    REGIME_FUTURES_AVAILABLE = False
+    REGIME_ES_RET = 0.0
+    REGIME_LEADING_SECTOR = ""
+    REGIME_LAGGING_SECTOR = ""
 
     # ORB — separate per direction
     ORB_OPEN_TIME = time(9, 30)     # ET
@@ -94,6 +103,22 @@ class OrbConfig:
     # VWAP recross exit
     USE_VWAP_RECROSS_EXIT = False   # Testing: was +$69 on old filters, retesting with tight run015 filters
     VWAP_RECROSS_MIN_BARS = 3       # Consecutive bars price must stay wrong side of VWAP to trigger exit
+
+    # Strategy Mode: "ORB" = breakout only, "ORF" = fade only, "BOTH" = both active
+    STRATEGY_MODE = "ORB"
+
+    # ORF (Opening Range Fade) parameters
+    ORF_MAX_REGIME = 0.50              # ORF only fires when REGIME_CURRENT <= this
+    ORF_MAX_ORB_RANGE_ATR = 3.0        # Skip fade if ORB range > N*ATR (trending day)
+    ORF_HARD_STOP_ATR_MULT = 1.0       # Hard stop at N*ATR beyond false breakout extreme
+    ORF_MIN_ENTRY_VOLUME = 50_000      # Min volume on re-entry bar
+    ORF_LAST_ENTRY_TIME = time(11, 0)  # No new ORF entries after 11 AM ET
+    ORF_MAX_LONGS = 2                  # Max concurrent ORF long positions
+    ORF_MAX_SHORTS = 2                 # Max concurrent ORF short positions
+    ORF_MAX_DAILY_PER_SYMBOL = 1       # Max ORF trades per symbol per day
+    ORF_REQUIRE_VWAP = True            # VWAP gate on re-entry bar
+    ORF_BREAKOUT_LOOKBACK_BARS = 3     # Re-entry must occur within N bars of false breakout
+    ORF_USE_ORB_TARGET = True          # Use opposite ORB boundary as secondary target
 
     # Direction override
     FORCE_DIRECTION = 0             # 1 = force LONG, -1 = force SHORT, 0 = normal gap tagging
